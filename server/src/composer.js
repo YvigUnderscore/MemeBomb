@@ -15,9 +15,11 @@ import { fileTypeFromBuffer } from 'file-type';
 import { config } from './config.js';
 import { HttpError, LOUDNORM_FILTER } from './media.js';
 import { logger } from './logger.js';
+import { runQueued } from './transcodeQueue.js';
 
 const MAX_LAYERS = 6;
 const W = 1280, H = 720, FPS = 30;
+const THREADS = String(config.transcode.threads);
 
 const num = (v, min, max, dflt) => {
   const n = Number(v);
@@ -25,6 +27,9 @@ const num = (v, min, max, dflt) => {
   return Math.min(max, Math.max(min, n));
 };
 
+// Volontairement HORS de la file des encodages : ces probes ont lieu avant
+// l'encodage de la même composition, les mettre dans la même file ferait
+// attendre un job derrière lui-même (interblocage). Ils coûtent quelques ms.
 function ffprobeFile(file) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(file, (err, data) => (err ? reject(err) : resolve(data)));
@@ -150,8 +155,14 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
     const D = num(comp.durationS, 0.5, maxDur, Math.min(maxDur, longest || 6)).toFixed(2);
 
     // Fond « Aucun » → sortie WebM VP9 avec canal alpha (transparence réelle).
+    // Le besoin d'alpha est décidé par l'éditeur et transmis explicitement : la
+    // déduction « pas de couleur de fond ⇒ alpha » rangeait tout fond MÉDIA avec
+    // le fond « Aucun », et imposait un encodage VP9 alpha — de loin le plus
+    // coûteux — à des scènes pourtant opaques. Repli sur l'ancienne règle quand
+    // le champ est absent : un editor.js encore en cache (cf. CLAUDE.md) ou un
+    // client tiers continuent de fonctionner à l'identique.
     const hasColorBg = /^#[0-9a-fA-F]{6}$/.test(comp?.bg || '');
-    const transparent = !hasColorBg;
+    const transparent = typeof comp?.transparent === 'boolean' ? comp.transparent : !hasColorBg;
     const out = path.join(config.tmpDir, `${id}_out.${transparent ? 'webm' : 'mp4'}`);
     tmps.push(out);
 
@@ -165,7 +176,9 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
     if (overlayPath) cmd.input(overlayPath);
 
     const filters = [];
-    const bg = hasColorBg ? '0x' + comp.bg.slice(1) : '0x000000@0.0';
+    // Scène opaque sans couleur choisie (fond média plein cadre) : base noire
+    // OPAQUE, la même que celle posée par le canvas de l'éditeur.
+    const bg = hasColorBg ? '0x' + comp.bg.slice(1) : (transparent ? '0x000000@0.0' : '0x000000');
     filters.push(`color=c=${bg}:s=${W}x${H}:r=${FPS}:d=${D},format=rgba[base]`);
 
     let prev = 'base';
@@ -253,12 +266,22 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
       ? ['-map', '[aout]', ...(transparent ? ['-c:a', 'libopus', '-b:a', '128k'] : ['-c:a', 'aac', '-b:a', '128k']), '-ac', '2']
       : ['-an'];
 
-    await new Promise((resolve, reject) => {
+    // Budget CPU : `-threads` borne l'encodeur, mais ici c'est le graphe de
+    // filtres qui pèse le plus (scale/perspective/overlay pour chaque calque)
+    // et il a son propre pool — sans `-filter_threads` et
+    // `-filter_complex_threads`, il reprend tous les cœurs de la machine.
+    const cpuOpts = ['-threads', THREADS, '-filter_threads', THREADS, '-filter_complex_threads', THREADS];
+
+    // L'encodage passe par la file : c'est le job le plus lourd du serveur,
+    // deux compositions concurrentes saturaient les 4 cœurs.
+    let waitMs = 0, runMs = 0;
+    await runQueued(`composition ${layerBuffers.length} calque(s)`, () => new Promise((resolve, reject) => {
       cmd.complexFilter(filters)
         .outputOptions([
           '-map', '[vout]',
           ...audioOpts,
           ...videoOpts,
+          ...cpuOpts,
           '-t', String(D),
           '-map_metadata', '-1',
         ])
@@ -266,10 +289,10 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
         .on('error', (e) => reject(e))
         .on('end', () => resolve())
         .save(out);
-    });
+    }), (m) => { waitMs = m.waitMs; runMs = m.runMs; });
 
     const buf = fs.readFileSync(out);
-    logger.info(`Composition: ${layerBuffers.length} calque(s) → ${(buf.length / 1048576).toFixed(2)} Mo (${D}s, ${transparent ? 'webm alpha' : 'mp4'})`);
+    logger.info(`Composition: ${layerBuffers.length} calque(s) → ${(buf.length / 1048576).toFixed(2)} Mo (${D}s, ${transparent ? 'webm alpha' : 'mp4'}) — attente file ${waitMs} ms, encodage ${runMs} ms`);
     return { buffer: buf, mime: transparent ? 'video/webm' : 'video/mp4', transparent };
   } catch (e) {
     if (e instanceof HttpError) throw e;

@@ -50,7 +50,14 @@ export async function createSchedule(p) {
     if (composed.transparent) media = await storeComposedVideo(composed.buffer, composed.mime);
     else p.mediaBuffer = composed.buffer;
   }
-  if (!media && p.mediaBuffer?.length) media = await processMedia(p.mediaBuffer, s);
+  if (!media && p.mediaBuffer?.length) {
+    media = await processMedia(p.mediaBuffer, s);
+    // Même raison qu'à l'enregistrement en bibliothèque : une scène animée
+    // composée par l'éditeur n'emprunte plus la branche calques ci-dessus, qui
+    // portait seule l'assertion. Contrôle identique à createAndDispatchMeme.
+    if (media.type === 'video' || media.type === 'gif') assertFeature(channel, owner, 'video', 'Vidéos/GIF');
+    if (media.type === 'audio') assertFeature(channel, owner, 'audio', 'Sons');
+  }
   if (p.overlayBuffer?.length) overlay = await processMedia(p.overlayBuffer, { ...s, allowedTypes: ['image'] });
   const sounds = await prepareSounds(channel, p, s);
   if (!media && !p.text) throw new HttpError(400, 'A schedule needs at least media or text.');

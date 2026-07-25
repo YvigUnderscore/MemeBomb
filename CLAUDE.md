@@ -63,3 +63,40 @@ Deux règles à ne pas défaire, chacune ayant déjà cassé la page en producti
   [server/src/app.js](server/src/app.js)) et `api.js` propage cette même version à `editor.js`.
   Sans ça, Cloudflare met en cache les `.js`/`.css` d'après leur extension et sert un `api.js`
   plus ancien que l'`editor.js` : méthodes manquantes et sons ignorés à l'envoi.
+
+## Budget CPU du transcodage
+
+Le serveur tourne sur une machine à 4 cœurs qui héberge aussi l'API, le WebSocket et le panel dans
+le même process. Un ffmpeg laissé libre prend tous les cœurs et rend le service injoignable le temps
+d'un envoi. Deux garde-fous, à ne pas retirer :
+
+- **File d'attente** ([server/src/transcodeQueue.js](server/src/transcodeQueue.js)) — tout encodage y
+  passe. **Jamais un `ffprobe`** : `handleVideo` et `composeLayers` probent leurs entrées *avant*
+  d'encoder, un probe mis en file derrière l'encodage qui l'attend figerait la file définitivement.
+- **`-threads`** sur chaque sortie ffmpeg, plus `-filter_threads`/`-filter_complex_threads` sur la
+  composition (son graphe de filtres a son propre pool), et `sharp.concurrency`.
+
+Réglés par `TRANSCODE_THREADS` (2) et `TRANSCODE_CONCURRENCY` (1) : au plus 2 cœurs occupés. Le
+bridage est applicatif à dessein — un `cpus:` sur le conteneur brimerait aussi l'API.
+
+## Composition des memes animés : client d'abord, serveur en repli
+
+Une scène animée **opaque** est composée par l'éditeur (canvas + `MediaRecorder`, cf.
+`composeSceneToVideo` dans [web-editor/editor.js](web-editor/editor.js)) et envoyée comme un `media`
+ordinaire, qui repasse par `processMedia` — la garantie anti-injection est donc intacte. Le serveur
+ne lance ffmpeg pour assembler que si le navigateur ne peut pas.
+
+- **Le chemin serveur (`layers` + `comp`) reste vivant, ne pas le supprimer** : il sert de repli pour
+  les navigateurs sans `MediaRecorder`, l'onglet passé en arrière-plan (`requestAnimationFrame` y est
+  suspendu, la vidéo se figerait), l'échec d'encodage et le dépassement de délai.
+- **`comp.transparent`** est le contrat entre l'éditeur et [server/src/composer.js](server/src/composer.js).
+  L'ancienne règle (« pas de couleur de fond ⇒ alpha ») rangeait tout fond média avec le fond
+  « Aucun » et imposait un VP9 alpha à des scènes opaques. Le serveur retombe sur cette règle quand
+  le champ est absent — indispensable tant qu'un `editor.js` peut être servi depuis un cache.
+  Couvert par `server/test/composerTransparency.test.js`.
+- **Le fond transparent reste composé par le serveur** : `MediaRecorder` ne conserve pas l'alpha sous
+  Chromium, et déléguer ce cas imposerait de stocker un WebM client sans le ré-encoder.
+- Toute branche qui accepte un média doit contrôler le feature-flag `video`/`audio` **après**
+  `processMedia` (voir `createAndDispatchMeme`, `writeAsset`, `createSchedule`) : depuis que
+  l'éditeur compose lui-même, un meme animé n'emprunte plus la branche « calques » qui portait
+  seule l'assertion.

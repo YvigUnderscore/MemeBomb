@@ -322,6 +322,20 @@ async function writeAsset(req, { replace = null } = {}) {
   } else if (f.media?.[0]?.buffer) {
     const allowed = kind === 'sound' ? ['audio'] : ['image', 'gif', 'video', 'audio'];
     media = await processMedia(f.media[0].buffer, { ...s, allowedTypes: allowed });
+    // Depuis que l'éditeur compose lui-même les scènes à fond couleur, un meme
+    // ANIMÉ arrive ici comme un média ordinaire au lieu d'emprunter la branche
+    // calques ci-dessus — laquelle portait seule l'assertion. Sans ce contrôle,
+    // composer côté client suffirait à contourner le feature-flag. Même règle
+    // que createAndDispatchMeme (memeService.js).
+    const featureOf = { video: ['video', 'Vidéos/GIF'], gif: ['video', 'Vidéos/GIF'], audio: ['audio', 'Sons'] }[media.type];
+    if (featureOf) {
+      try {
+        assertFeature(channel, owner, featureOf[0], featureOf[1]);
+      } catch (e) {
+        removeMediaFile(media.relPath); // le rendu transcodé ne sera jamais référencé
+        throw e;
+      }
+    }
     data.mediaType = media.type;
   }
   const finalJson = JSON.stringify(data);

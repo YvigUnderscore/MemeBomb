@@ -14,6 +14,13 @@ services:
     image: memedrop:latest
     container_name: memedrop
     restart: unless-stopped
+    # Le bridage CPU réel se fait DANS l'application : `-threads` sur chaque
+    # sortie ffmpeg + file d'attente des encodages (TRANSCODE_THREADS et
+    # TRANSCODE_CONCURRENCY ci-dessous). Un `cpus:` actif ici brimerait AUSSI
+    # l'API, le WebSocket et le panel, qui partagent ce conteneur — c'est
+    # exactement la réactivité qu'on cherche à préserver. À n'activer qu'en
+    # filet de sécurité, si un ffmpeg déborde malgré tout.
+    # cpus: "3.0"
     ports:
       # Publié sur toutes les interfaces : un reverse proxy en conteneur
       # (cloudflared, nginx, Nginx Proxy Manager…) a sa propre boucle locale et
@@ -45,6 +52,9 @@ services:
       MAX_VIDEO_DURATION_S: ${MAX_VIDEO_DURATION_S:-15}
       MAX_AUDIO_DURATION_S: ${MAX_AUDIO_DURATION_S:-15}
       MAX_TEXT_LENGTH: ${MAX_TEXT_LENGTH:-280}
+      # Budget CPU du transcodage ffmpeg (voir .env.example).
+      TRANSCODE_THREADS: ${TRANSCODE_THREADS:-2}
+      TRANSCODE_CONCURRENCY: ${TRANSCODE_CONCURRENCY:-1}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Qui a le droit de renseigner X-Forwarded-For (voir .env.example).
       TRUST_PROXY: ${TRUST_PROXY:-}

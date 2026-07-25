@@ -107,6 +107,16 @@ export const config = {
     maxAudioDurationS: parseInt(process.env.MAX_AUDIO_DURATION_S || '15', 10),
     maxTextLength: parseInt(process.env.MAX_TEXT_LENGTH || '280', 10),
   },
+  // Budget CPU du transcodage. La machine hôte a 4 cœurs et l'API, le
+  // WebSocket et le panel vivent dans le même process : un ffmpeg libre de
+  // prendre tous les cœurs rend le serveur injoignable le temps d'un envoi.
+  // `threads` borne chaque process ffmpeg (et le pool libvips de sharp),
+  // `concurrency` borne le nombre d'encodages simultanés (transcodeQueue.js).
+  // Défauts 2 × 1 = au plus 2 cœurs occupés, 2 restent pour servir.
+  transcode: {
+    threads: Math.max(1, parseInt(process.env.TRANSCODE_THREADS || '2', 10) || 2),
+    concurrency: Math.max(1, parseInt(process.env.TRANSCODE_CONCURRENCY || '1', 10) || 1),
+  },
   logLevel: process.env.LOG_LEVEL || 'info',
   // Quels intermédiaires ont le droit de renseigner X-Forwarded-For.
   // Le rate limiting (dont celui du login) compte par IP cliente, et cette IP

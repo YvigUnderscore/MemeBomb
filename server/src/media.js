@@ -17,6 +17,14 @@ import ffmpeg from 'fluent-ffmpeg';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { runQueued } from './transcodeQueue.js';
+
+// Budget CPU commun à ffmpeg et à sharp (voir config.transcode).
+const THREADS = String(config.transcode.threads);
+// sharp ouvre par défaut un thread libvips par cœur : sans ce plafond, il
+// reprendrait d'une main les cœurs que `-threads` et la file concèdent de
+// l'autre, et une rafale d'images suffirait à saturer la machine.
+sharp.concurrency(config.transcode.threads);
 
 // --- Résolution des binaires ffmpeg/ffprobe -----------------------------
 async function resolveBinaries() {
@@ -60,11 +68,15 @@ export const LOUDNORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 // NB : le builder doit terminer par .output(...) et JAMAIS .save(...) —
 // .save() démarre déjà le process, et le .run() d'ici lancerait un second
 // ffmpeg écrivant le même fichier en parallèle (corruption aléatoire).
-function runFfmpeg(build) {
-  return new Promise((resolve, reject) => {
+// Tout encodage passe par la file (transcodeQueue.js) : sans elle, deux
+// envois simultanés lancent deux ffmpeg qui se disputent les 4 cœurs et
+// l'API cesse de répondre. Les ffprobe, eux, restent hors file (rapides, et
+// handleVideo probe AVANT d'encoder → interblocage garanti sinon).
+function runFfmpeg(label, build) {
+  return runQueued(label, () => new Promise((resolve, reject) => {
     const cmd = build(ffmpeg());
     cmd.on('end', resolve).on('error', reject).run();
-  });
+  }));
 }
 
 /**
@@ -132,11 +144,12 @@ async function handleGif(id, settings) {
   // Un GIF animé est converti en MP4 muet en boucle : plus léger, ré-encodé,
   // et affiché en boucle par le client comme un GIF.
   try {
-    await runFfmpeg((c) => c.input(tmpIn)
+    await runFfmpeg('gif→mp4', (c) => c.input(tmpIn)
       .noAudio()
       .duration(maxDur)
       .videoCodec('libx264')
       .outputOptions([
+        '-threads', THREADS,
         '-preset', 'veryfast',
         '-profile:v', 'main',
         '-level', '4.0',
@@ -169,11 +182,12 @@ async function handleVideo(id, settings) {
   // Sortie h264 "main" 8-bit 4:2:0, faststart : lisible par Chromium/Electron
   // quel que soit l'encodage source (HEVC, VP9, 10-bit, ProRes...).
   try {
-    await runFfmpeg((c) => {
+    await runFfmpeg('video→mp4', (c) => {
       let cmd = c.input(tmpIn)
         .duration(settings.maxVideoDurationS || 15)
         .videoCodec('libx264')
         .outputOptions([
+          '-threads', THREADS,
           '-preset', 'veryfast',
           '-profile:v', 'main',
           '-level', '4.0',
@@ -209,13 +223,13 @@ async function handleAudio(id, settings) {
   const rel = `${id}.m4a`;
   const abs = path.join(config.mediaDir, rel);
   try {
-    await runFfmpeg((c) => c.input(tmpIn)
+    await runFfmpeg('audio→m4a', (c) => c.input(tmpIn)
       .noVideo()
       .duration(settings.maxAudioDurationS || 15)
       .audioCodec('aac')
       .audioBitrate('160k')
       .audioFilters(LOUDNORM_FILTER)
-      .outputOptions(['-ar', '48000', '-map_metadata', '-1', '-movflags', '+faststart'])
+      .outputOptions(['-threads', THREADS, '-ar', '48000', '-map_metadata', '-1', '-movflags', '+faststart'])
       .format('mp4')
       .output(abs));
   } catch (e) {

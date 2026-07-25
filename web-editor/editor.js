@@ -312,7 +312,7 @@ function renderElements() {
     applyQuadToNode(node, el);
   }
   for (const [id, node] of nodeCache) {
-    if (!seen.has(id)) { node.remove(); nodeCache.delete(id); }
+    if (!seen.has(id)) { node.remove(); nodeCache.delete(id); warpScratch.delete(id); }
   }
   renderLayers();
 }
@@ -1198,7 +1198,54 @@ function initMiniPlace() {
 // which : 'all' | 'under' (z < minVideoZ) | 'over' (z >= minVideoZ) — permet
 // de respecter l'ordre des calques quand des vidéos sont composées serveur.
 // Le dessin (strokes) est TOUJOURS au-dessus, comme dans l'éditeur.
-function bake(transparent, which = 'all', minVideoZ = Infinity) {
+
+// Source dessinable d'un calque à l'instant présent. Pendant l'encodage vidéo
+// navigateur, `renderSources` substitue aux nœuds de l'éditeur des <video>
+// dédiés (remis à zéro, non bouclés, audibles) : le rendu et l'aperçu de
+// l'éditeur ne se marchent alors pas dessus.
+let renderSources = null;   // Map el.id -> élément dessinable, null hors encodage
+function layerSource(el) {
+  if (renderSources && renderSources.has(el.id)) return renderSources.get(el.id);
+  if (el.type === 'video') { const n = nodeCache.get(el.id); return n ? n.firstChild : null; }
+  return el._img || null;
+}
+// Un <video> pas encore décodé (ou une image pas encore chargée) dessinerait du
+// vide, voire lèverait : on saute le calque plutôt que de gâcher la frame.
+function sourceReady(src) {
+  if (!src) return false;
+  if (src.tagName === 'VIDEO') return src.readyState >= 2 && src.videoWidth > 0;
+  return (src.naturalWidth || src.width || 0) > 0;
+}
+
+// GÉOMÉTRIE COMMUNE au rendu figé (bake) et à l'encodage vidéo navigateur :
+// position, rotation, opacité et corner-pin sont calculés ICI et nulle part
+// ailleurs — deux implémentations finiraient inévitablement par diverger.
+// `keep` choisit les calques concernés par la passe en cours.
+function drawSceneLayers(ctx, EW, EH, keep) {
+  for (const el of [...els].sort((a, b) => a.z - b.z)) {
+    if (el.hidden || !keep(el)) continue;
+    const src = el.type === 'text' ? null : layerSource(el);
+    if (el.type !== 'text' && !sourceReady(src)) continue;
+    ctx.save(); ctx.globalAlpha = el.opacity; ctx.translate(el.xPct * EW, el.yPct * EH); ctx.rotate(el.rot * Math.PI / 180);
+    if (hasQuad(el)) {
+      drawElementWarped(ctx, el, EW, src);
+    } else if (el.type === 'text') {
+      const fpx = el.fontFrac * EW;
+      ctx.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+      if (el.outline) { ctx.strokeStyle = '#000'; ctx.lineWidth = fpx * 0.12; ctx.strokeText(el.text || '', 0, 0); }
+      ctx.fillStyle = el.color; ctx.fillText(el.text || '', 0, 0);
+    } else {
+      const w = el.wPct * EW, h = w / el.ratio; ctx.drawImage(src, -w / 2, -h / 2, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+// Canvas de composition statique. Les calques vidéo/gif en sont exclus : étant
+// animés, ils sont composés soit par le navigateur (composeSceneToVideo), soit
+// par ffmpeg côté serveur.
+function bakeCanvas(transparent, which = 'all', minVideoZ = Infinity) {
   const EW = 1280, EH = 720;
   const c = document.createElement('canvas'); c.width = EW; c.height = EH;
   const ctx = c.getContext('2d');
@@ -1206,35 +1253,34 @@ function bake(transparent, which = 'all', minVideoZ = Infinity) {
     if (base.mode === 'color') { ctx.fillStyle = $('bgColor').value; ctx.fillRect(0, 0, EW, EH); }
     else if (base.mode === 'media' && base.img) { drawContain(ctx, base.img, EW, EH); }
   }
-  const pass = which === 'under' ? (el) => el.z < minVideoZ
-    : which === 'over' ? (el) => el.z >= minVideoZ
-      : () => true;
-  for (const el of [...els].sort((a, b) => a.z - b.z)) {
-    if (el.hidden || el.type === 'video' || !pass(el)) continue; // vidéos/gifs composés côté serveur
-    ctx.save(); ctx.globalAlpha = el.opacity; ctx.translate(el.xPct * EW, el.yPct * EH); ctx.rotate(el.rot * Math.PI / 180);
-    if (hasQuad(el)) {
-      drawElementWarped(ctx, el, EW);
-    } else if (el.type === 'text') {
-      const fpx = el.fontFrac * EW;
-      ctx.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
-      if (el.outline) { ctx.strokeStyle = '#000'; ctx.lineWidth = fpx * 0.12; ctx.strokeText(el.text || '', 0, 0); }
-      ctx.fillStyle = el.color; ctx.fillText(el.text || '', 0, 0);
-    } else if (el._img) {
-      const w = el.wPct * EW, h = w / el.ratio; ctx.drawImage(el._img, -w / 2, -h / 2, w, h);
-    }
-    ctx.restore();
-  }
+  const keep = which === 'under' ? (el) => el.type !== 'video' && el.z < minVideoZ
+    : which === 'over' ? (el) => el.type !== 'video' && el.z >= minVideoZ
+      : (el) => el.type !== 'video';
+  drawSceneLayers(ctx, EW, EH, keep);
   if (which !== 'under') renderStrokes(ctx, EW, EH);
-  return c.toDataURL('image/png');
+  return c;
+}
+function bake(transparent, which = 'all', minVideoZ = Infinity) {
+  return bakeCanvas(transparent, which, minVideoZ).toDataURL('image/png');
 }
 
 // ---- Rendu déformé (corner pin) sur canvas ------------------------------
 // Rend l'élément dans un canvas local puis le warpe par homographie
 // (maillage de triangles — canvas 2D ne sait pas faire de perspective).
-function drawElementWarped(ctx, el, EW) {
-  const src = document.createElement('canvas');
+// `source` : image/vidéo à déformer (null pour un texte, rendu ici même).
+// Un canvas de travail est réutilisé par calque — pendant l'encodage on repasse
+// ici 30 fois par seconde, en allouer un neuf à chaque frame ferait ramer le GC.
+const warpScratch = new Map();   // el.id -> canvas de travail
+function warpScratchFor(el, w, h) {
+  let c = warpScratch.get(el.id);
+  if (!c) { c = document.createElement('canvas'); warpScratch.set(el.id, c); }
+  c.width = w; c.height = h;     // réassigner width remet aussi le canvas à zéro
+  return c;
+}
+function drawElementWarped(ctx, el, EW, source) {
+  let src;
   if (el.type === 'text') {
+    src = document.createElement('canvas');
     const fpx = el.fontFrac * EW;
     const meas = src.getContext('2d');
     meas.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
@@ -1245,10 +1291,14 @@ function drawElementWarped(ctx, el, EW) {
     s.textAlign = 'center'; s.textBaseline = 'middle'; s.lineJoin = 'round';
     if (el.outline) { s.strokeStyle = '#000'; s.lineWidth = fpx * 0.12; s.strokeText(el.text || '', src.width / 2, src.height / 2); }
     s.fillStyle = el.color; s.fillText(el.text || '', src.width / 2, src.height / 2);
-  } else if (el._img) {
+  } else if (source) {
+    // Images ET vidéos : la frame courante est d'abord rendue à la taille du
+    // calque, puis déformée — même maillage pour les deux, donc même rendu.
     const w = el.wPct * EW, h = w / el.ratio;
-    src.width = Math.max(4, Math.round(w)); src.height = Math.max(4, Math.round(h));
-    src.getContext('2d').drawImage(el._img, 0, 0, src.width, src.height);
+    src = warpScratchFor(el, Math.max(4, Math.round(w)), Math.max(4, Math.round(h)));
+    const sctx = src.getContext('2d');
+    sctx.imageSmoothingQuality = 'high';
+    sctx.drawImage(source, 0, 0, src.width, src.height);
   } else return;
   // Coins déformés en repère local CENTRÉ (le ctx est déjà translaté/roté).
   const corners = quadCorners(el, src.width, src.height).map(([x, y]) => [x - src.width / 2, y - src.height / 2]);
@@ -1291,14 +1341,332 @@ function videoQuadPx(el) {
     return [Math.round(cx + lx * cos - ly * sin), Math.round(cy + lx * sin + ly * cos)];
   });
 }
+// Équivalent du `scale=1280:720:force_original_aspect_ratio=decrease` + overlay
+// centré du serveur. Accepte une <img> comme une <video> (dimensions natives
+// lues sur l'un ou l'autre jeu de propriétés).
 function drawContain(ctx, img, W, H) {
-  const r = img.naturalWidth / img.naturalHeight, cr = W / H;
+  const iw = img.naturalWidth || img.videoWidth || img.width;
+  const ih = img.naturalHeight || img.videoHeight || img.height;
+  if (!iw || !ih) return;
+  const r = iw / ih, cr = W / H;
   let w = W, h = H; if (r > cr) h = W / r; else w = H * r;
   ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
 }
 
+// ============================================================
+//  Composition de la vidéo DANS LE NAVIGATEUR (canvas + MediaRecorder)
+//  ---------------------------------------------------------------------
+//  Le serveur tourne sur une petite machine : composer un meme animé avec
+//  ffmpeg la sature. Quand le navigateur en est capable, il rend lui-même la
+//  scène frame par frame et la vidéo obtenue part comme un `media` ordinaire
+//  — elle repasse donc par le pipeline de validation serveur habituel.
+//  TOUT échec (support manquant, exception, délai dépassé, fond transparent)
+//  retombe SILENCIEUSEMENT sur le chemin serveur (calques + comp), inchangé :
+//  l'utilisateur ne doit jamais voir passer une erreur d'encodage, seule la
+//  console en garde la raison.
+// ============================================================
+const ENC_FPS = 30;                // même cadence que le composer serveur
+const ENC_VIDEO_BPS = 4_500_000;   // ~8 Mo pour 15 s : large sous la limite d'upload
+const ENC_AUDIO_BPS = 128_000;
+const ENC_GUARD_MS = 10_000;       // garde-fou au-delà de la durée de la scène
+// VP9 d'abord (meilleure qualité à débit égal), VP8 en repli.
+const ENC_MIMES = [
+  'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus',
+  'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm',
+];
+
+function clientEncodeSupport() {
+  if (typeof MediaRecorder === 'undefined') return { ok: false, reason: 'MediaRecorder indisponible' };
+  if (!window.HTMLCanvasElement || !HTMLCanvasElement.prototype.captureStream) {
+    return { ok: false, reason: 'canvas.captureStream() indisponible' };
+  }
+  if (!(window.AudioContext || window.webkitAudioContext)) return { ok: false, reason: 'WebAudio indisponible' };
+  let mimeType = null;
+  for (const m of ENC_MIMES) {
+    try { if (MediaRecorder.isTypeSupported(m)) { mimeType = m; break; } } catch { /* ignore */ }
+  }
+  if (!mimeType) return { ok: false, reason: 'aucun profil WebM supporté par MediaRecorder' };
+  return { ok: true, mimeType };
+}
+
+// Les <video> de l'encodage vivent hors écran mais DANS le document : un média
+// détaché peut ne jamais décoder de frame selon le moteur.
+function encodeStage() {
+  let box = $('encodeStage');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'encodeStage';
+    box.style.cssText = 'position:fixed;left:-10000px;top:0;width:2px;height:2px;overflow:hidden;pointer-events:none';
+    document.body.appendChild(box);
+  }
+  return box;
+}
+function openEncodeVideo(url) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    v.src = url; v.preload = 'auto'; v.playsInline = true; v.loop = false;
+    // NON muet : la piste doit alimenter le graphe WebAudio. createMediaElementSource
+    // détourne la sortie de l'élément, rien ne sort donc des haut-parleurs.
+    v.muted = false; v.volume = 1;
+    v.onloadeddata = () => resolve(v);
+    v.onerror = () => reject(new Error('calque vidéo illisible'));
+    encodeStage().appendChild(v);
+  });
+}
+
+// Une frame complète de la scène animée, dans l'ORDRE EXACT du filtergraph
+// serveur : couleur de fond → habillage « under » → calques vidéo (z croissant)
+// → habillage « over ». Les deux habillages sont des canvas gravés une seule
+// fois, strictement les mêmes pixels que les PNG envoyés au serveur.
+function drawEncodeFrame(ctx, EW, EH, plan, under, over, sources, bgSource) {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  // Rééchantillonnage soigné : ffmpeg met à l'échelle en bicubique, le réglage
+  // par défaut du canvas est bien plus grossier — les deux rendus s'écarteraient
+  // visiblement sur un calque fortement réduit.
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  // Noir quand le fond est un média : c'est la couleur de base opaque que le
+  // serveur pose sous le calque plein cadre dans ce même cas.
+  ctx.fillStyle = plan.bg || '#000';
+  ctx.fillRect(0, 0, EW, EH);
+  // Fond média, cadré en « contain » comme l'aperçu et comme le calque
+  // `full: true` que le serveur place en premier.
+  if (bgSource && sourceReady(bgSource)) drawContain(ctx, bgSource, EW, EH);
+  if (under) ctx.drawImage(under, 0, 0);
+  renderSources = sources;
+  try { drawSceneLayers(ctx, EW, EH, (el) => plan.vidIds.has(el.id)); }
+  finally { renderSources = null; }
+  if (over) ctx.drawImage(over, 0, 0);
+}
+
+async function composeSceneToVideo(plan, mimeType, onProgress) {
+  const EW = 1280, EH = 720;
+  const durationMs = clamp(plan.durationS, 0.5, window._maxVideoS || 15) * 1000;
+  const urls = [];
+  const teardown = [];
+  let guardT = null;
+
+  const run = async () => {
+    // L'onglet caché suspend requestAnimationFrame : le canvas cesserait d'être
+    // redessiné et la vidéo se figerait sur une image, avec un son qui continue.
+    // On préfère replier sur le serveur que livrer ça.
+    if (document.hidden) throw new Error('onglet en arrière-plan');
+    const under = plan.hasUnder ? bakeCanvas(true, 'under', plan.minVideoZ) : null;
+    const over = plan.hasOver ? bakeCanvas(true, 'over', plan.minVideoZ) : null;
+
+    // Sources dédiées pour les vidéos — jamais celles de l'éditeur, qui bouclent,
+    // sont muettes et n'en sont pas au même point de lecture. Les GIF, eux,
+    // réutilisent le <img> vivant de la scène (un GIF hors écran n'anime pas).
+    const sources = new Map();
+    const videoEls = [];
+
+    // Fond média plein cadre (scène opaque, cf. sceneIsTransparent). Une vidéo
+    // de fond reçoit sa propre source — et son audio entre dans le mix, comme
+    // le calque `full: true` correspondant côté serveur. Une image ou un GIF
+    // réutilisent l'élément vivant de la scène.
+    let bgSource = null;
+    if (plan.bgMedia) {
+      if (plan.bgMedia.kind === 'video') {
+        const url = URL.createObjectURL(plan.bgMedia.file); urls.push(url);
+        bgSource = await openEncodeVideo(url);
+        videoEls.push(bgSource);
+      } else {
+        bgSource = bgVisualEl(plan.bgMedia);
+      }
+    }
+
+    for (const el of plan.vids) {
+      if (el.kind === 'gif') continue;
+      const file = mediaFiles.get(el.id).file;
+      const url = URL.createObjectURL(file); urls.push(url);
+      const v = await openEncodeVideo(url);
+      sources.set(el.id, v); videoEls.push(v);
+    }
+
+    const canvas = document.createElement('canvas'); canvas.width = EW; canvas.height = EH;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const stream = canvas.captureStream(ENC_FPS);
+
+    // captureStream() d'un canvas ne porte AUCUNE piste audio : on mixe
+    // nous-mêmes celles des calques vidéo. Pas de normalisation de sonie ici —
+    // le serveur applique déjà un loudnorm EBU R128 au ré-encodage.
+    if (videoEls.length) {
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      teardown.push(() => { try { actx.close(); } catch { /* ignore */ } });
+      if (actx.state === 'suspended') { try { await actx.resume(); } catch { /* ignore */ } }
+      const dest = actx.createMediaStreamDestination();
+      for (const v of videoEls) {
+        try { actx.createMediaElementSource(v).connect(dest); }
+        catch (e) { console.warn('[compose] piste audio ignorée :', e.message); }
+      }
+      for (const t of dest.stream.getAudioTracks()) stream.addTrack(t);
+    }
+
+    const rec = new MediaRecorder(stream, {
+      mimeType, videoBitsPerSecond: ENC_VIDEO_BPS, audioBitsPerSecond: ENC_AUDIO_BPS,
+    });
+    // Coupe l'enregistreur si le garde-fou (ou une erreur) court-circuite la
+    // suite : sans ça il continuerait à tourner dans le vide après le repli.
+    teardown.push(() => { try { if (rec.state !== 'inactive') rec.stop(); } catch { /* ignore */ } });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((resolve, reject) => {
+      rec.onstop = () => resolve();
+      rec.onerror = (e) => reject(new Error('MediaRecorder: ' + (e?.error?.name || 'erreur')));
+    });
+    stopped.catch(() => { /* l'échec est relevé par le await plus bas */ });
+
+    // Lecture en temps réel depuis le début. Une vidéo plus courte que la scène
+    // se termine et reste affichée sur sa dernière image, que le canvas continue
+    // de dessiner : c'est exactement le `tpad=stop_mode=clone` du serveur.
+    for (const v of videoEls) { try { v.currentTime = 0; } catch { /* ignore */ } }
+    await Promise.all(videoEls.map((v) => (v.play() || Promise.resolve()).catch(() => {})));
+
+    let raf = 0; let running = true;
+    teardown.push(() => { running = false; cancelAnimationFrame(raf); for (const v of videoEls) { try { v.pause(); } catch { /* ignore */ } } });
+    const t0 = performance.now();
+    let lastPct = -1;
+    const tick = () => {
+      if (!running) return;
+      drawEncodeFrame(ctx, EW, EH, plan, under, over, sources, bgSource);
+      // Progression au pour-cent près : inutile de retoucher le DOM à 60 Hz.
+      const r = clamp((performance.now() - t0) / durationMs, 0, 1);
+      const pct = Math.round(r * 100);
+      if (onProgress && pct !== lastPct) { lastPct = pct; onProgress(r); }
+      raf = requestAnimationFrame(tick);
+    };
+    drawEncodeFrame(ctx, EW, EH, plan, under, over, sources, bgSource); // évite une 1re frame noire
+    rec.start();
+    raf = requestAnimationFrame(tick);
+    await new Promise((r) => setTimeout(r, durationMs));
+    running = false; cancelAnimationFrame(raf);
+    rec.stop();
+    await stopped;
+    if (onProgress) onProgress(1);
+    return new Blob(chunks, { type: mimeType.split(';')[0] });
+  };
+
+  // Le garde-fou court contre l'encodage : si le second gagne, le premier
+  // continue de se dénouer en arrière-plan — d'où le catch neutre, sinon son
+  // rejet (démonté par le finally) remonterait en « unhandled rejection ».
+  const job = run();
+  job.catch(() => { /* le repli est déjà décidé par la course ci-dessous */ });
+  // Troisième concurrent : l'onglet qui passe en arrière-plan. rAF y est
+  // suspendu, l'enregistrement continuerait sur une image figée — on abandonne
+  // pour repartir sur le chemin serveur, qui lui rendra la scène complète.
+  let onHidden = null;
+  const hidden = new Promise((_, reject) => {
+    onHidden = () => { if (document.hidden) reject(new Error('onglet passé en arrière-plan')); };
+    document.addEventListener('visibilitychange', onHidden);
+  });
+  hidden.catch(() => { /* idem : la course tranche */ });
+  try {
+    return await Promise.race([job, hidden, new Promise((_, reject) => {
+      guardT = setTimeout(() => reject(new Error('délai d\'encodage dépassé')), durationMs + ENC_GUARD_MS);
+    })]);
+  } finally {
+    document.removeEventListener('visibilitychange', onHidden);
+    clearTimeout(guardT);
+    renderSources = null;
+    for (const fn of teardown) { try { fn(); } catch { /* ignore */ } }
+    for (const u of urls) { try { URL.revokeObjectURL(u); } catch { /* ignore */ } }
+    const box = $('encodeStage'); if (box) box.replaceChildren();
+  }
+}
+
+// Tente la composition navigateur. Renvoie un `media` prêt à envoyer, ou null
+// pour dire « garde le chemin serveur » (jamais d'exception vers l'appelant).
+async function composeIfPossible(plan, onProgress) {
+  if (!plan) return null;
+  // Seule une scène à canal alpha reste au serveur : lui seul sait sortir du
+  // WebM VP9 alpha, que `MediaRecorder` ne produit pas sous Chromium. Un fond
+  // couleur ou un fond média plein cadre passent ici (cf. sceneIsTransparent).
+  if (plan.transparent) {
+    console.warn('[compose] scène à fond transparent → composition serveur : MediaRecorder ne conserve pas l\'alpha');
+    return null;
+  }
+  const sup = clientEncodeSupport();
+  if (!sup.ok) { console.warn(`[compose] ${sup.reason} → composition serveur`); return null; }
+  try {
+    const blob = await composeSceneToVideo(plan, sup.mimeType, onProgress);
+    if (!blob || blob.size < 1024) throw new Error('flux vidéo vide');
+    const mb = blob.size / 1048576, max = window._maxUploadMb || 25;
+    if (mb > max) throw new Error(`vidéo composée trop lourde (${mb.toFixed(1)} Mo > ${max} Mo)`);
+    // `composed` : marqueur interne (ignoré par memeForm/assetForm) permettant
+    // de reconnaître une vidéo déjà assemblée d'un simple fichier de fond.
+    return { file: new File([blob], 'meme.webm', { type: blob.type }), mime: blob.type, filename: 'meme.webm', composed: true };
+  } catch (e) {
+    console.warn('[compose] encodage navigateur abandonné → composition serveur :', e.message);
+    return null;
+  }
+}
+
 function textForModeration() { return els.filter((e) => e.type === 'text').map((e) => e.text).join(' ').trim(); }
 function hasContent() { return els.length || strokes.length || (base.mode === 'media' && base.media); }
+
+// Fond média dont le fichier est réellement présent (pas restauré d'un historique).
+function currentBgMedia() {
+  return base.mode === 'media' && base.media && base.media.file ? base.media : null;
+}
+
+// Élément vivant qui porte le fond média : il donne ses dimensions naturelles,
+// et c'est lui qu'on dessine (un GIF de fond y anime déjà tout seul).
+function bgVisualEl(bgMedia) {
+  if (!bgMedia) return null;
+  if (bgMedia.kind === 'video') return $('stageVideo');
+  if (bgMedia.kind === 'image' || bgMedia.kind === 'gif') return $('stageImg');
+  return null; // fond sonore : aucun visuel
+}
+
+// Un fond média est cadré en « contain » : il ne couvre tout le cadre que si son
+// rapport est celui du canvas. Sinon il subsiste des bandes, que le serveur rend
+// TRANSPARENTES — le meme flotte alors sur l'écran du destinataire. Un canvas
+// aplati par MediaRecorder ne sait pas reproduire ça, d'où le test.
+function bgFillsCanvas(bgMedia) {
+  const el = bgVisualEl(bgMedia);
+  if (!el || !sourceReady(el)) return false;
+  const w = el.videoWidth || el.naturalWidth || 0;
+  const h = el.videoHeight || el.naturalHeight || 0;
+  if (!w || !h) return false;
+  const scale = Math.min(1280 / w, 720 / h);
+  return (1280 - w * scale) < 1 && (720 - h * scale) < 1; // bandes sous le pixel
+}
+
+// La scène a-t-elle besoin d'une sortie à canal alpha ? Décidé ICI et transmis
+// explicitement au serveur (comp.transparent), au lieu de lui laisser déduire
+// « pas de couleur de fond ⇒ alpha » : cette déduction rangeait le fond « None »
+// ET tout fond média dans le même sac, imposant un encodage VP9 alpha coûteux à
+// des scènes pourtant parfaitement opaques.
+function sceneIsTransparent(bgMedia) {
+  if (base.mode === 'color') return false;
+  return !bgFillsCanvas(bgMedia);
+}
+
+// Description UNIQUE d'une scène animée, partagée par le payload serveur
+// (calques + comp) et par l'encodage navigateur : une seule source de vérité,
+// sinon les deux chemins finiraient par ne plus décrire la même scène.
+// Renvoie null si la scène n'a aucun calque vidéo/gif exploitable.
+function animatedScenePlan() {
+  const vids = els.filter((e) => !e.hidden && e.type === 'video' && mediaFiles.get(e.id)?.file)
+    .sort((a, b) => a.z - b.z);
+  if (!vids.length) return null;
+  const minVideoZ = Math.min(...vids.map((v) => v.z));
+  const bgMedia = currentBgMedia();
+  return {
+    vids,
+    vidIds: new Set(vids.map((v) => v.id)),
+    bgMedia,
+    transparent: sceneIsTransparent(bgMedia),
+    minVideoZ,
+    // Statiques SOUS la première vidéo → PNG « under » ; le reste (+ le dessin)
+    // → overlay du dessus. L'ordre des calques est ainsi respecté.
+    hasUnder: els.some((e) => !e.hidden && e.type !== 'video' && e.z < minVideoZ),
+    hasOver: els.some((e) => !e.hidden && e.type !== 'video' && e.z >= minVideoZ) || strokes.length > 0,
+    bg: base.mode === 'color' ? $('bgColor').value : null,
+    durationS: options.durationS,
+  };
+}
 
 function buildPayload() {
   const opts = { ...options };
@@ -1309,14 +1677,12 @@ function buildPayload() {
     .filter((s) => s.assetId || s.file)
     .map((s) => (s.assetId ? { assetId: s.assetId, name: s.name } : { file: s.file, mime: s.mime, filename: s.name }));
 
-  // Calques vidéo/gif visibles, avec fichier encore présent, en z croissant.
-  const vids = els.filter((e) => !e.hidden && e.type === 'video' && mediaFiles.get(e.id)?.file)
-    .sort((a, b) => a.z - b.z);
-  // Fond média avec fichier réellement présent (pas restauré d'un historique).
-  const bgMedia = base.mode === 'media' && base.media && base.media.file ? base.media : null;
+  const bgMedia = currentBgMedia();
   const hasStatic = els.some((e) => !e.hidden && e.type !== 'video') || strokes.length > 0;
+  // Calques vidéo/gif visibles, avec fichier encore présent, en z croissant.
+  const plan = animatedScenePlan();
 
-  if (vids.length) {
+  if (plan) {
     // --- Composition serveur : fond + calques vidéo + statiques. -----------
     // L'ordre des calques est RESPECTÉ : les éléments statiques situés SOUS la
     // première vidéo partent dans un PNG « under » (calque plein cadre sous les
@@ -1324,9 +1690,7 @@ function buildPayload() {
     if (bgMedia && bgMedia.kind === 'audio') {
       throw new Error('Audio background + video layers is not supported. Use "Sound on appear" instead.');
     }
-    const minVideoZ = Math.min(...vids.map((v) => v.z));
-    const hasUnder = els.some((e) => !e.hidden && e.type !== 'video' && e.z < minVideoZ);
-    const hasOver = els.some((e) => !e.hidden && e.type !== 'video' && e.z >= minVideoZ) || strokes.length > 0;
+    const { vids, minVideoZ, hasUnder, hasOver } = plan;
 
     const files = []; const layers = [];
     if (bgMedia) { // fond vidéo/gif/image plein cadre, sous les calques
@@ -1345,7 +1709,9 @@ function buildPayload() {
     }
     opts.bakedText = true;
     payload.layers = files;
-    payload.comp = { v: 1, bg: base.mode === 'color' ? $('bgColor').value : null, durationS: options.durationS, layers };
+    // `transparent` est explicite : sans lui le serveur déduirait l'alpha de
+    // l'absence de couleur et encoderait en VP9 alpha une scène opaque.
+    payload.comp = { v: 1, bg: plan.bg, transparent: plan.transparent, durationS: plan.durationS, layers };
     if (hasOver) payload.overlay = { dataUrl: bake(true, 'over', minVideoZ), filename: 'overlay.png' };
   } else if (bgMedia && ['video', 'gif', 'audio'].includes(bgMedia.kind)) {
     // --- Fond vidéo/gif/son seul : envoi brut + overlay PNG (chemin léger). ---
@@ -1359,20 +1725,42 @@ function buildPayload() {
   return payload;
 }
 
+// Payload d'envoi. Une scène animée est d'abord tentée EN LOCAL : si le
+// navigateur sait composer la vidéo, elle remplace calques + comp + overlay par
+// un `media` ordinaire et le serveur n'a plus à lancer ffmpeg pour l'assembler.
+// Sinon on renvoie tel quel le payload serveur, sans rien dire à l'utilisateur.
+async function buildPayloadForSend(onProgress) {
+  const payload = buildPayload();
+  if (!payload.layers) return payload;
+  const media = await composeIfPossible(animatedScenePlan(), onProgress);
+  if (!media) return payload;
+  const out = { ...payload, media };
+  delete out.layers; delete out.comp; delete out.overlay; // tout est gravé dans la vidéo
+  return out;
+}
+
 // Rendu à stocker dans la bibliothèque. Une scène animée (calques vidéo/GIF ou
-// fond vidéo/GIF) est enregistrée comme les envois : le serveur compose les
-// calques en une vidéo. Sinon on garde l'image aplatie, plus légère.
-// → { layers, comp, overlay } pour l'animé, { media } pour le statique.
-function assetRender() {
-  const p = buildPayload();
+// fond vidéo/GIF) est enregistrée comme les envois : la vidéo est composée dans
+// le navigateur quand c'est possible, par le serveur sinon. Une scène fixe reste
+// une image aplatie, plus légère.
+// → { media } pour une vidéo déjà composée ou une image, { layers, comp, overlay }
+//   quand la composition revient au serveur.
+async function assetRender(onProgress) {
+  const p = await buildPayloadForSend(onProgress);
   if (p.layers) return { layers: p.layers, comp: p.comp, overlay: p.overlay || null };
+  // Vidéo composée dans le navigateur : elle est stockée comme n'importe quel
+  // média (le serveur la ré-encode en MP4 via le pipeline habituel).
+  if (p.media?.composed) return { media: p.media };
   // Fond vidéo/GIF seul : un unique calque plein cadre, l'habillage statique
   // (textes, images, dessin) restant gravé par-dessus via l'overlay.
   const bg = p.media;
   if (bg?.file && ['video', 'gif'].includes(base.media?.kind)) {
     return {
       layers: [{ file: bg.file, filename: bg.filename }],
-      comp: { v: 1, bg: null, durationS: options.durationS, layers: [{ full: true }] },
+      comp: {
+        v: 1, bg: null, transparent: sceneIsTransparent(currentBgMedia()),
+        durationS: options.durationS, layers: [{ full: true }],
+      },
       overlay: p.overlay || null,
     };
   }
@@ -1389,18 +1777,37 @@ function dataURLtoBlobLocal(dataUrl) {
 }
 
 // ---- Envoi / planification / bibliothèque -------------------------------
+// L'encodage navigateur se fait en TEMPS RÉEL (jusqu'à 15 s) : sans retour
+// visuel, l'éditeur passerait pour figé. On reste sur ses codes habituels —
+// libellé du bouton + ligne de message — plutôt que d'inventer un widget.
+function encodeProgressUI(btn, hint) {
+  let announced = false;
+  return (ratio) => {
+    btn.textContent = `🎬 Rendering ${Math.round(clamp(ratio, 0, 1) * 100)}%`;
+    if (!announced && hint) {
+      announced = true;
+      hint.style.color = 'var(--muted)';
+      hint.textContent = 'Rendering the animation in your browser — keep this tab visible.';
+    }
+  };
+}
+function clearHint(hint) { if (hint) { hint.style.color = ''; hint.textContent = ''; } }
+
 $('sendBtn').onclick = async () => {
   $('sendErr').textContent = '';
   if (!hasContent()) { $('sendErr').textContent = 'Add at least one element or a background.'; return; }
   const btn = $('sendBtn'); btn.disabled = true; btn.textContent = 'Sending…';
   try {
     saveLast(); // mémorise la scène pour « Reprendre le dernier » (#40)
-    const r = await api.sendMeme(buildPayload());
+    const payload = await buildPayloadForSend(encodeProgressUI(btn, $('sendErr')));
+    clearHint($('sendErr'));
+    btn.textContent = 'Sending…';
+    const r = await api.sendMeme(payload);
     btn.textContent = r?.pending ? 'Pending moderation ⏳'
       : r?.queued ? `Queued — sending ${r.warmupRemainS ? `in ~${r.warmupRemainS}s` : 'after warmup'} ⏳`
         : 'Sent ✅';
     setTimeout(() => { btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }, (r?.pending || r?.queued) ? 2600 : 1200);
-  } catch (e) { $('sendErr').textContent = e.message; btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }
+  } catch (e) { clearHint($('sendErr')); $('sendErr').textContent = e.message; btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }
 };
 
 // ---- Bibliothèque de memes enregistrés ---------------------------------
@@ -1467,7 +1874,8 @@ $('saveOk').onclick = async () => {
     // Rendu figé une fois pour toutes (image aplatie, ou vidéo composée si la
     // scène est animée) : renvoyable et téléchargeable tel quel, sans
     // recomposition côté serveur.
-    const render = assetRender();
+    const render = await assetRender(encodeProgressUI(btn, $('saveErr')));
+    clearHint($('saveErr'));
     const data = {
       text: textForModeration(),
       options: { ...options, box: placeBox, bakedText: true },
@@ -1490,7 +1898,7 @@ $('saveOk').onclick = async () => {
     $('sendErr').style.color = 'var(--success)';
     $('sendErr').textContent = replace ? 'Meme updated in your library ✓' : 'Saved to your library ✓';
     setTimeout(() => { $('sendErr').style.color = ''; $('sendErr').textContent = ''; }, 2500);
-  } catch (e) { $('saveErr').textContent = e.message; }
+  } catch (e) { clearHint($('saveErr')); $('saveErr').textContent = e.message; }
   finally { btn.disabled = false; btn.textContent = 'Save'; }
 };
 
@@ -1908,9 +2316,13 @@ $('schOk').onclick = async () => {
   else { const days = [...$('schDays').querySelectorAll('.active')].map((b) => +b.dataset.day); if (!days.length) { $('schErr').textContent = 'Pick at least one day.'; return; } trigger = { type: 'recurring', days, time: $('schTime').value || '12:00' }; }
   const btn = $('schOk'); btn.disabled = true; btn.textContent = '…';
   try {
-    await api.scheduleMeme({ ...buildPayload(), label: $('schLabel').value || '', trigger });
+    // Même composition navigateur que pour un envoi : le serveur compose sinon
+    // les calques avec ffmpeg dès la création de la planification.
+    const payload = await buildPayloadForSend(encodeProgressUI(btn, $('schErr')));
+    clearHint($('schErr'));
+    await api.scheduleMeme({ ...payload, label: $('schLabel').value || '', trigger });
     $('schModal').classList.add('hidden'); $('sendErr').style.color = 'var(--success)'; $('sendErr').textContent = 'Meme scheduled ✓';
     setTimeout(() => { $('sendErr').style.color = ''; $('sendErr').textContent = ''; }, 2500);
-  } catch (e) { $('schErr').textContent = e.message; }
+  } catch (e) { clearHint($('schErr')); $('schErr').textContent = e.message; }
   finally { btn.disabled = false; btn.textContent = 'Schedule'; }
 };
