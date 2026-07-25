@@ -156,9 +156,13 @@ async function handleIncomingMeme(meme) {
     // Son à l'apparition + overlay : téléchargés localement eux aussi — la CSP
     // stricte de l'overlay bloque toute URL distante (c'était la cause des
     // sons « qui n'arrivent pas » chez le destinataire).
-    let localSound = null;
-    if (meme.sound && meme.sound.url) {
-      try { localSound = await connection.downloadAux(meme.sound.url, 'm4a'); temps.push(localSound); }
+    // Un meme peut porter plusieurs sons (`sounds`) ; `sound` reste lu pour les
+    // memes émis par un serveur d'avant le multi-son.
+    const soundUrls = (meme.sounds && meme.sounds.length ? meme.sounds : (meme.sound ? [meme.sound] : []))
+      .map((s) => s && s.url).filter(Boolean);
+    const localSounds = [];
+    for (const url of soundUrls) {
+      try { const p = await connection.downloadAux(url, 'm4a'); localSounds.push(p); temps.push(p); }
       catch (e) { console.error('Son du meme non téléchargé:', e.message); }
     }
     let localOverlay = null;
@@ -172,7 +176,8 @@ async function handleIncomingMeme(meme) {
     overlay.sendMeme({
       ...meme,
       localPath: local ? pathToFileURL(local).href : null,
-      localSoundPath: localSound ? pathToFileURL(localSound).href : null,
+      localSoundPath: localSounds[0] ? pathToFileURL(localSounds[0]).href : null,
+      localSoundPaths: localSounds.map((p) => pathToFileURL(p).href),
       localOverlayPath: localOverlay ? pathToFileURL(localOverlay).href : null,
     });
   } catch (e) {

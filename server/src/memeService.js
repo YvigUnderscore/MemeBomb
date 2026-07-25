@@ -13,7 +13,7 @@ import { config } from './config.js';
 import { checkText } from './moderation.js';
 import { processMedia, probeStoredMedia, storeComposedVideo, HttpError } from './media.js';
 import { composeLayers } from './composer.js';
-import { removeMediaFile } from './retention.js';
+import { removeMediaFile, soundPathsOf } from './retention.js';
 import { broadcast, onlineCount, onlineSince, pushPanel } from './wsHub.js';
 import { assertFeature } from './features.js';
 import { postMemeFeed } from './discordManager.js'; // cycle ESM ok (déclarations de fonctions)
@@ -92,6 +92,47 @@ function feedMeme(channel, { targets, groupNames, senderName, text, media }) {
   }).catch(() => {});
 }
 
+// Sons attachés à un meme : plusieurs fichiers et/ou assets de bibliothèque,
+// joués ensemble à l'apparition. Plafonné pour borner le transcodage et le
+// nombre de fichiers que le destinataire doit télécharger.
+export const MAX_SOUNDS = 4;
+
+/**
+ * Transcode / copie les sons d'un envoi. Accepte les formes multiples
+ * (soundBuffers, soundAssets) comme les anciennes (soundBuffer, soundAsset).
+ */
+export async function prepareSounds(channel, p, settings) {
+  const buffers = (p.soundBuffers || (p.soundBuffer ? [p.soundBuffer] : [])).filter((b) => b?.length);
+  const assets = (p.soundAssets || (p.soundAsset ? [p.soundAsset] : [])).filter((a) => a?.relPath);
+  if (!buffers.length && !assets.length) return [];
+  assertFeature(channel, p.sender ?? p.owner, 'sounds', 'Sons personnalisés');
+
+  const out = [];
+  for (const buf of buffers.slice(0, MAX_SOUNDS)) {
+    out.push(await processMedia(buf, { ...settings, allowedTypes: ['audio'] }));
+  }
+  for (const a of assets.slice(0, Math.max(0, MAX_SOUNDS - out.length))) {
+    // Son de la bibliothèque (#13) : déjà transcodé, on le copie sans le re-traiter.
+    const rel = copyMediaFile(a.relPath);
+    if (rel) out.push({ relPath: rel, mime: a.mime || 'audio/mp4', durationMs: 0 });
+  }
+  return out;
+}
+
+/** Inscrit les sons dans les options (soundPath = 1er son, lu par les clients d'avant le multi-son). */
+export function applySoundOptions(options, sounds) {
+  if (!sounds?.length) return options;
+  options.soundPaths = sounds.map((s) => s.relPath);
+  options.soundPath = sounds[0].relPath;
+  return options;
+}
+
+/** Bloc `sound`/`sounds` du payload WebSocket, à partir des chemins stockés. */
+function soundPayload(paths, durations = []) {
+  const list = paths.map((relPath, i) => ({ url: signMediaUrl(relPath), durationMs: durations[i] || 0 }));
+  return { sound: list[0] || null, sounds: list };
+}
+
 /** Résout la liste de discord_id destinataires à partir de groupes + mentions. */
 export function resolveTargets(channelId, { groupNames = [], mentions = [] }) {
   const ids = new Set(mentions.map(String).filter(Boolean));
@@ -120,6 +161,7 @@ export function resolveTargets(channelId, { groupNames = [], mentions = [] }) {
  * @param {string} p.senderName
  * @param {string} [p.text]
  * @param {Buffer} [p.mediaBuffer]
+ * @param {object} [p.mediaAsset] média déjà transcodé (bibliothèque) : { relPath, mime, size, type }
  * @param {string[]} [p.groupNames]
  * @param {string[]} [p.mentions]
  * @param {object} [p.options]    position/taille/durée/volume/opacité...
@@ -186,23 +228,28 @@ export async function createAndDispatchMeme(p) {
     media = await processMedia(p.mediaBuffer, settings);
     if (media.type === 'video' || media.type === 'gif') assertFeature(channel, p.sender, 'video', 'Vidéos/GIF');
     if (media.type === 'audio') assertFeature(channel, p.sender, 'audio', 'Sons');
+  } else if (!media && p.mediaAsset && p.mediaAsset.relPath) {
+    // Meme de la bibliothèque : média déjà transcodé (donc déjà passé par
+    // processMedia à l'enregistrement), on le copie sans le re-traiter.
+    const rel = copyMediaFile(p.mediaAsset.relPath);
+    if (!rel) throw new HttpError(404, 'The saved media no longer exists.');
+    const type = p.mediaAsset.type || 'image';
+    const probed = await probeStoredMedia(path.join(config.mediaDir, rel), p.mediaAsset.mime);
+    media = {
+      type, relPath: rel, mime: p.mediaAsset.mime, size: p.mediaAsset.size || 0, ...probed,
+      loop: type === 'gif', muted: type === 'gif',
+    };
+    if (type === 'video' || type === 'gif') assertFeature(channel, p.sender, 'video', 'Vidéos/GIF');
+    if (type === 'audio') assertFeature(channel, p.sender, 'audio', 'Sons');
   }
   // Overlay (éléments composés au-dessus d'une vidéo).
   let overlay = null;
   if (p.overlayBuffer && p.overlayBuffer.length) {
     overlay = await processMedia(p.overlayBuffer, { ...settings, allowedTypes: ['image'] });
   }
-  // Son additionnel (asset joué à l'apparition).
-  let sound = null;
-  if (p.soundBuffer && p.soundBuffer.length) {
-    assertFeature(channel, p.sender, 'sounds', 'Sons personnalisés');
-    sound = await processMedia(p.soundBuffer, { ...settings, allowedTypes: ['audio'] });
-  } else if (p.soundAsset && p.soundAsset.relPath) {
-    // Son de la bibliothèque (#13) : déjà transcodé, on le copie sans le re-traiter.
-    assertFeature(channel, p.sender, 'sounds', 'Sons personnalisés');
-    const rel = copyMediaFile(p.soundAsset.relPath);
-    if (rel) sound = { relPath: rel, mime: p.soundAsset.mime || 'audio/mp4', durationMs: 0 };
-  }
+  // Sons additionnels joués à l'apparition (fichiers et/ou assets de la
+  // bibliothèque), tous mixés ensemble chez le destinataire.
+  const sounds = await prepareSounds(channel, p, settings);
   if (!media && !text) throw new HttpError(400, 'A meme needs at least media or text.');
 
   // 5. Cibles.
@@ -214,7 +261,7 @@ export async function createAndDispatchMeme(p) {
   // 6. Options d'affichage (bornées).
   const options = sanitizeOptions(p.options || {}, settings, media);
   if (overlay) options.overlayPath = overlay.relPath;
-  if (sound) options.soundPath = sound.relPath;
+  applySoundOptions(options, sounds);
   // Mémorise les groupes ciblés (feed Discord des memes sortis de la file).
   if (p.groupNames?.length) options.__groups = p.groupNames.slice(0, 10).map(String);
 
@@ -280,7 +327,7 @@ export async function createAndDispatchMeme(p) {
         muted: !!media.muted,
       } : null,
       overlay: overlay ? { url: signMediaUrl(overlay.relPath) } : null,
-      sound: sound ? { url: signMediaUrl(sound.relPath), durationMs: sound.durationMs } : null,
+      ...soundPayload(sounds.map((s) => s.relPath), sounds.map((s) => s.durationMs)),
       options,
       ts: now(),
     },
@@ -297,9 +344,10 @@ export async function createAndDispatchMeme(p) {
 
 /**
  * Diffuse un meme déjà préparé (fichiers stockés) — utilisé par le scheduler,
- * sans re-transcodage. mediaInfo/overlayInfo/soundInfo = { relPath, ... }.
+ * sans re-transcodage. mediaInfo/overlayInfo = { relPath, ... }, soundInfos = [{ relPath, ... }].
  */
-export function dispatchPrepared(channel, { sender, senderName, text, mediaInfo, overlayInfo, soundInfo, options, targets }) {
+export function dispatchPrepared(channel, { sender, senderName, text, mediaInfo, overlayInfo, soundInfos, soundInfo, options, targets }) {
+  const soundList = (soundInfos || (soundInfo ? [soundInfo] : [])).filter((s) => s?.relPath);
   const id = nanoid(14);
   const kind = mediaInfo ? mediaInfo.type : 'text';
   db.prepare(`INSERT INTO memes
@@ -319,7 +367,7 @@ export function dispatchPrepared(channel, { sender, senderName, text, mediaInfo,
         height: mediaInfo.height, durationMs: mediaInfo.durationMs, loop: !!mediaInfo.loop, muted: !!mediaInfo.muted,
       } : null,
       overlay: overlayInfo ? { url: signMediaUrl(overlayInfo.relPath) } : null,
-      sound: soundInfo ? { url: signMediaUrl(soundInfo.relPath) } : null,
+      ...soundPayload(soundList.map((s) => s.relPath), soundList.map((s) => s.durationMs)),
       options: options || {}, ts: now(),
     },
   };
@@ -360,7 +408,7 @@ function buildMemePayload(id, channel, m, media, options) {
         durationMs: media.durationMs, loop: media.loop, muted: media.muted,
       } : null,
       overlay: options.overlayPath ? { url: signMediaUrl(options.overlayPath) } : null,
-      sound: options.soundPath ? { url: signMediaUrl(options.soundPath) } : null,
+      ...soundPayload(soundPathsOf(options)),
       options, ts: now(),
     },
   };
@@ -445,7 +493,9 @@ export async function resendMeme(channel, memeId, moderatorSender, moderatorName
   }
   const options = JSON.parse(m.options || '{}');
   if (options.overlayPath) options.overlayPath = copyMediaFile(options.overlayPath);
-  if (options.soundPath) options.soundPath = copyMediaFile(options.soundPath);
+  const copiedSounds = soundPathsOf(options).map((p) => copyMediaFile(p)).filter(Boolean);
+  delete options.soundPath; delete options.soundPaths;
+  applySoundOptions(options, copiedSounds.map((relPath) => ({ relPath })));
 
   const row = { ...m, media_path: mediaPath, options: JSON.stringify(options) };
   const { media } = await hydrateStoredMedia(row);
@@ -472,7 +522,7 @@ export function rejectMeme(channel, memeId, moderator) {
   const options = JSON.parse(m.options || '{}');
   removeMediaFile(m.media_path);
   if (options.overlayPath) removeMediaFile(options.overlayPath);
-  if (options.soundPath) removeMediaFile(options.soundPath);
+  for (const p of soundPathsOf(options)) removeMediaFile(p);
 
   db.prepare("UPDATE memes SET status = 'removed', media_path = NULL WHERE id = ?").run(m.id);
   audit(moderator || 'moderator', 'meme.reject', { id: m.id, channel: channel.slug });

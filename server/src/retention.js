@@ -26,14 +26,21 @@ function rmMedia(mediaPath) {
 // Utilisé partout où un fichier média référencé (asset, schedule, meme rejeté...) doit être effacé.
 export const removeMediaFile = rmMedia;
 
-// Un meme peut référencer jusqu'à 3 fichiers : le média principal, et (dans `options`)
-// un overlay composé et/ou un son additionnel — tous doivent être nettoyés ensemble.
+// Sons attachés à un meme. `soundPaths` (plusieurs sons) est la forme courante ;
+// `soundPath` reste lu pour les memes enregistrés avant le multi-son.
+export function soundPathsOf(options) {
+  if (Array.isArray(options?.soundPaths)) return options.soundPaths.filter(Boolean);
+  return options?.soundPath ? [options.soundPath] : [];
+}
+
+// Un meme peut référencer plusieurs fichiers : le média principal, et (dans `options`)
+// un overlay composé et/ou des sons additionnels — tous doivent être nettoyés ensemble.
 function removeMemeFiles(m) {
   rmMedia(m.media_path);
   try {
     const o = JSON.parse(m.options || '{}');
     if (o.overlayPath) rmMedia(o.overlayPath);
-    if (o.soundPath) rmMedia(o.soundPath);
+    for (const p of soundPathsOf(o)) rmMedia(p);
   } catch { /* ignore */ }
 }
 

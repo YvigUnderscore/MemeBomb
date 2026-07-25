@@ -7,7 +7,7 @@ import { config } from '../config.js';
 import { panelAuth, requireStaff } from '../auth.js';
 import { createAndDispatchMeme, signMediaUrl, approveMeme, rejectMeme, resendMeme } from '../memeService.js';
 import { processMedia } from '../media.js';
-import { deleteAllMemes, removeMediaFile } from '../retention.js';
+import { deleteAllMemes, removeMediaFile, soundPathsOf } from '../retention.js';
 import { asyncHandler, loadChannel } from './helpers.js';
 
 // Monté sur /api/channels/:channelId/
@@ -139,7 +139,7 @@ router.delete('/memes/:memeId', loadChannel, asyncHandler((req, res) => {
   removeMediaFile(m.media_path);
   const options = JSON.parse(m.options || '{}');
   if (options.overlayPath) removeMediaFile(options.overlayPath);
-  if (options.soundPath) removeMediaFile(options.soundPath);
+  for (const p of soundPathsOf(options)) removeMediaFile(p);
   db.prepare("UPDATE memes SET status = 'removed', media_path = NULL WHERE id = ?").run(m.id);
   audit(req.user.username, 'meme.remove', { channel: req.channel.slug, meme: m.id });
   res.json({ ok: true });

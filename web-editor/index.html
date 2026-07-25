@@ -77,6 +77,7 @@
         <button class="btn btn-ghost" id="tbDraw">🖊️ Draw</button>
         <button class="btn btn-ghost" id="tbDistort" title="Drag a corner to distort (perspective). Ctrl+drag also works without this mode.">🔷 Distort</button>
         <button class="btn btn-ghost" id="tbTemplate" title="Meme templates">📐 Templates</button>
+        <button class="btn btn-ghost" id="tbLibrary" title="Your saved memes: edit, send or delete">📚 My memes</button>
         <button class="btn btn-ghost hidden" id="tbLast" title="Resume the last meme">↩️ Last</button>
         <span class="draw-tools hidden" id="drawTools">
           <button class="btn btn-ghost" id="drawPen" title="Pen">✏️</button>
@@ -143,9 +144,10 @@
       <!-- Sound popover -->
       <div class="tool-pop hidden" id="soundPop">
         <div id="soundCard">
-          <h4>Sound on appear</h4>
+          <h4>Sounds on appear</h4>
           <button class="btn btn-ghost wide" id="soundPick">Add a sound (file)</button>
           <div class="muted small" id="soundName">No sound</div>
+          <div class="muted small">Attached sounds are listed in the right panel, under the layers.</div>
 
           <h4 style="margin-top:12px">🔊 Soundboard (myinstants)</h4>
           <div class="row" style="gap:6px">
@@ -175,6 +177,16 @@
         <div class="card pad sect">
           <h4>Layers</h4>
           <div id="layersList" class="layers"></div>
+        </div>
+
+        <!-- Sounds attached to the meme (played together on appear) -->
+        <div class="card pad sect" id="soundsSect">
+          <h4>Sounds <span class="badge" id="soundsBadge">0</span></h4>
+          <div id="soundsList" class="sounds-list"></div>
+          <div class="row">
+            <button class="btn btn-ghost" id="soundsAdd" title="Add a sound file">＋ Sound file</button>
+            <button class="btn btn-ghost" id="soundsBrowse" title="Search or pick from your library">🔊 Soundboard</button>
+          </div>
         </div>
 
         <!-- Selected element -->
@@ -272,8 +284,31 @@
       <h3>Save the meme</h3>
       <label class="label">Name</label>
       <input class="input" id="saveName" placeholder="My meme" />
+      <!-- Shown only when the current scene was opened from the library -->
+      <label class="chk hidden" id="saveReplaceWrap" style="margin-top:10px">
+        <input type="checkbox" id="saveReplace" checked> Update "<span id="saveReplaceName"></span>" instead of creating a copy
+      </label>
+      <div class="save-warn hidden" id="saveWarn"></div>
       <div class="err" id="saveErr"></div>
       <div class="row end"><button class="btn btn-ghost" id="saveCancel">Cancel</button><button class="btn btn-primary" id="saveOk">Save</button></div>
+    </div>
+  </div>
+
+  <!-- My saved memes (per-user library) -->
+  <div class="modal hidden" id="libModal">
+    <div class="modal-box card pad" style="max-width:860px">
+      <h3>My saved memes</h3>
+      <div class="row" style="gap:6px; align-items:center; margin-top:0">
+        <input id="libSearch" class="input" placeholder="Search…" style="flex:1" />
+        <button class="btn btn-ghost" id="libFavOnly" title="Favorites only">☆</button>
+        <span class="badge" id="libTargetBadge">everyone</span>
+      </div>
+      <div class="muted small" style="margin-top:6px">
+        ✏️ reopens the meme in the editor · 🚀 sends it as is to the selected recipients · 🗑 deletes it.
+      </div>
+      <div id="libGrid" class="lib-grid"></div>
+      <div class="muted small" id="libMsg"></div>
+      <div class="row end"><button class="btn btn-primary" id="libClose">Close</button></div>
     </div>
   </div>
 

@@ -4,7 +4,7 @@ import { db, now, audit, getChannelSettings } from './db.js';
 import { processMedia, storeComposedVideo, HttpError } from './media.js';
 import { composeLayers } from './composer.js';
 import { assertFeature } from './features.js';
-import { resolveTargets, sanitizeOptions, dispatchPrepared, dispatchQueuedMemes, copyMediaFile } from './memeService.js';
+import { resolveTargets, sanitizeOptions, dispatchPrepared, dispatchQueuedMemes, prepareSounds, applySoundOptions } from './memeService.js';
 import { logger } from './logger.js';
 
 const parse = (v, d) => { try { return typeof v === 'string' ? JSON.parse(v) : (v ?? d); } catch { return d; } };
@@ -41,7 +41,7 @@ export async function createSchedule(p) {
     throw new HttpError(429, `Limit of ${s.maxSchedulesPerUser} schedules reached.`);
   }
 
-  let media = null; let overlay = null; let sound = null;
+  let media = null; let overlay = null;
   // Composition multi-calques (voir memeService) : préparée dès la création.
   if (p.layerBuffers?.length) {
     assertFeature(channel, owner, 'video', 'Vidéos/GIF');
@@ -52,20 +52,14 @@ export async function createSchedule(p) {
   }
   if (!media && p.mediaBuffer?.length) media = await processMedia(p.mediaBuffer, s);
   if (p.overlayBuffer?.length) overlay = await processMedia(p.overlayBuffer, { ...s, allowedTypes: ['image'] });
-  if (p.soundBuffer?.length) sound = await processMedia(p.soundBuffer, { ...s, allowedTypes: ['audio'] });
-  else if (p.soundAsset?.relPath) {
-    // Son de la bibliothèque (#13) : copie du fichier déjà transcodé.
-    assertFeature(channel, owner, 'sounds', 'Sons personnalisés');
-    const rel = copyMediaFile(p.soundAsset.relPath);
-    if (rel) sound = { relPath: rel, mime: p.soundAsset.mime || 'audio/mp4', durationMs: 0 };
-  }
+  const sounds = await prepareSounds(channel, p, s);
   if (!media && !p.text) throw new HttpError(400, 'A schedule needs at least media or text.');
 
   const targets = resolveTargets(channel.id, { groupNames: p.groupNames || [], mentions: p.mentions || [] });
   const options = sanitizeOptions(p.options || {}, s, media);
   if (overlay) options.overlayPath = overlay.relPath;
-  if (sound) options.soundPath = sound.relPath;
-  options.__prepared = { media, overlay, sound };
+  applySoundOptions(options, sounds);
+  options.__prepared = { media, overlay, sounds };
 
   const trigger = p.trigger || {};
   const type = trigger.type === 'recurring' ? 'recurring' : 'at';
@@ -78,7 +72,7 @@ export async function createSchedule(p) {
        trigger_type, trigger_at, trigger_days, trigger_time, next_run, active, created_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
     .run(id, channel.id, owner, p.device?.name || '', (p.label || '').slice(0, 80), p.text || '',
-      media?.relPath || null, media?.mime || null, sound?.relPath || null,
+      media?.relPath || null, media?.mime || null, sounds[0]?.relPath || null,
       JSON.stringify(options), JSON.stringify(targets),
       type, type === 'at' ? nextRun : null, JSON.stringify(trigger.days || []), trigger.time || '',
       nextRun, now());
@@ -97,7 +91,8 @@ function runDue() {
       delete options.__prepared;
       dispatchPrepared(channel, {
         sender: sch.owner, senderName: sch.owner_name,
-        text: sch.text, mediaInfo: prepared.media, overlayInfo: prepared.overlay, soundInfo: prepared.sound,
+        text: sch.text, mediaInfo: prepared.media, overlayInfo: prepared.overlay,
+        soundInfos: prepared.sounds || (prepared.sound ? [prepared.sound] : []),
         options, targets: parse(sch.targets, []),
       });
     } catch (e) { logger.error('Schedule dispatch:', e.message); }

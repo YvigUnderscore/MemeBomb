@@ -1,6 +1,19 @@
-# MemeDrop v1.2.1
+# MemeDrop v1.3.0 — "Saved memes & multi-sound"
 
-Follow-up to v1.2.0: the sender's profile picture now always shows left of their name on the overlay — Discord avatar when known, Discord default avatar otherwise, colored initial badge as a last resort.
+## ✨ New
+
+### Saved memes library (editor)
+- **Every user now has a library of saved memes.** Hit 💾 Save to store a meme (its final render *and* its editable scene: layers, text, drawing, display settings, attached sounds).
+- **📚 My memes** in the toolbar opens the library: **✏️ Edit** reopens a meme in the editor for a quick retouch, **🚀 Send** fires it as is to the selected recipients (no re-upload, no re-encoding), **🗑** deletes it. Search and ★ favorites included.
+- Re-saving a meme you opened from the library **updates it** instead of piling up copies.
+- Saved memes count against your storage quota (render + scene), shown in the header counter.
+
+### Several sounds per meme
+- A meme can now carry **up to 4 sounds**, played together when it appears — mix a soundboard clip with your own file.
+- Attached sounds are listed in the right panel, **under the layers**: preview each one (▶) or remove it (🗑).
+
+## 🔧 Client (Windows)
+- The overlay downloads and plays **all** the sounds attached to a meme (previously only the first one). Memes sent from older servers still work unchanged.
 
 ---
 

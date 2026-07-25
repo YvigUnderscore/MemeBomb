@@ -434,11 +434,13 @@
       mediaEl.play?.().catch(() => {});
     }
 
-    // Son additionnel (asset) joué à l'apparition, indépendant du média.
-    // Fichier local obligatoire : la CSP de l'overlay refuse l'audio distant.
-    if (meme.localSoundPath) {
+    // Sons additionnels (assets) joués ensemble à l'apparition, indépendants du
+    // média. Fichier local obligatoire : la CSP de l'overlay refuse l'audio distant.
+    const sfxPaths = meme.localSoundPaths?.length ? meme.localSoundPaths
+      : (meme.localSoundPath ? [meme.localSoundPath] : []);
+    for (const src of sfxPaths) {
       const sfx = document.createElement('audio');
-      sfx.src = meme.localSoundPath; sfx.autoplay = true;
+      sfx.src = src; sfx.autoplay = true;
       sfx.volume = effectiveVolume(opt);
       sfx.muted = sfx.volume === 0;
       stage.appendChild(sfx);

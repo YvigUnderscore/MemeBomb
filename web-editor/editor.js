@@ -17,7 +17,10 @@ const dctx = drawCanvas.getContext('2d');
 let els = [];             // calques (texte / image / vidéo / gif)
 let selId = null;
 let base = { mode: 'none', color: '#111114', media: null, img: null };
-let sound = null;         // { path, name, mime }
+// Sons joués à l'apparition du meme (tous ensemble) : fichier local
+// { file, name, mime } ou son de la bibliothèque { assetId, name, url }.
+let sounds = [];
+const MAX_SOUNDS = 4;     // doit rester ≤ MAX_SOUNDS côté serveur
 let strokes = [];         // dessin : [{color,sizeFrac,points:[{x,y}fractions]}]
 let drawMode = false;
 let features = {};
@@ -96,7 +99,7 @@ function payloadWeightMb() {
     else if (el.type === 'image' && el.src) bytes += Math.round((el.src.length || 0) * 0.75); // dataUrl → binaire
   }
   if (base.mode === 'media' && base.media?.file) bytes += base.media.file.size;
-  if (sound?.file) bytes += sound.file.size;
+  for (const s of sounds) if (s.file) bytes += s.file.size;
   return bytes / 1048576;
 }
 function updateWeight() {
@@ -470,12 +473,18 @@ function serializableMedia(m) {
   if (!m) return null;
   return { name: m.name, kind: m.kind, mime: m.mime, dataUrl: m.dataUrl || null };
 }
-function serializableSound(s) {
-  if (!s) return null;
-  return s.assetId ? { assetId: s.assetId, name: s.name, url: s.url || null } : { name: s.name, mime: s.mime };
+// Un File n'est pas sérialisable : d'un son fichier on ne garde que son nom
+// (l'entrée reste visible mais devra être re-choisie après un rechargement).
+function serializableSounds(list) {
+  return (list || []).map((s) => (s.assetId
+    ? { assetId: s.assetId, name: s.name, url: s.url || null }
+    : { name: s.name, mime: s.mime }));
 }
+// La couleur de fond vit dans l'input (updateBg/bake la lisent là) : on la
+// capture ici, sinon undo — et un meme rechargé depuis la bibliothèque —
+// repartirait sur la couleur par défaut.
 function snapshot() {
-  return JSON.stringify({ els: serializeEls(), strokes, base: { mode: base.mode, color: base.color, media: serializableMedia(base.media) }, sound: serializableSound(sound), options, placeBox });
+  return JSON.stringify({ els: serializeEls(), strokes, base: { mode: base.mode, color: $('bgColor').value, media: serializableMedia(base.media) }, sounds: serializableSounds(sounds), options, placeBox });
 }
 function pushHistory() {
   const snap = snapshot();
@@ -496,12 +505,14 @@ function restore(snap) {
   els.filter((e) => e.type === 'image' && e.src).forEach((e) => { const im = new Image(); im.onload = () => renderElements(); im.src = e.src; e._img = im; });
   strokes = s.strokes || [];
   base.mode = s.base.mode; base.color = s.base.color; base.media = s.base.media; base.img = null;
+  if (s.base.color) $('bgColor').value = s.base.color;
   if (base.media && base.media.kind === 'image' && base.media.dataUrl) { const im = new Image(); im.onload = () => updateBg(); im.src = base.media.dataUrl; base.img = im; }
-  sound = s.sound || null; placeBox = s.placeBox || { xPct: 0.25, yPct: 0.25, wPct: 0.5 };
+  // `sound` (objet unique) : scènes enregistrées avant le multi-son.
+  sounds = (s.sounds || (s.sound ? [s.sound] : [])).map((x) => ({ ...x }));
+  placeBox = s.placeBox || { xPct: 0.25, yPct: 0.25, wPct: 0.5 };
   Object.assign(options, s.options || {});
   selId = null; $('elCard').classList.add('hidden');
-  setBgMode(base.mode); renderElements(); renderStrokes(); renderMiniBox();
-  $('soundName').textContent = sound ? sound.name : 'No sound';
+  setBgMode(base.mode); renderElements(); renderStrokes(); renderMiniBox(); renderSounds();
   updateUndoButtons(); updateWeight();
 }
 function undo() { if (hIndex > 0) { hIndex--; restore(history[hIndex]); } }
@@ -817,14 +828,93 @@ function updateBg() {
   }
 }
 
-// ---- Son ----------------------------------------------------------------
-$('soundPick').onclick = async () => {
+// ---- Sons attachés au meme ---------------------------------------------
+// Plusieurs sons peuvent être empilés (fichiers et/ou sons de la
+// bibliothèque) ; ils sont joués ensemble à l'apparition du meme et listés
+// dans le panneau de droite, sous les calques.
+function addSound(s) {
+  if (sounds.length >= MAX_SOUNDS) {
+    $('sendErr').textContent = `${MAX_SOUNDS} sounds max per meme.`;
+    return false;
+  }
+  if (s.assetId && sounds.some((x) => x.assetId === s.assetId)) return false; // déjà attaché
+  sounds.push(s);
+  renderSounds(); commit();
+  return true;
+}
+function removeSound(i) {
+  const [gone] = sounds.splice(i, 1);
+  if (gone && gone._url) { try { URL.revokeObjectURL(gone._url); } catch { /* ignore */ } }
+  sndStop();
+  renderSounds(); commit();
+}
+// Source lisible d'un son : fichier local (objet URL mis en cache) ou URL signée.
+function soundSrc(s) {
+  if (s.file) { if (!s._url) s._url = URL.createObjectURL(s.file); return s._url; }
+  return s.url || null;
+}
+
+let sndAudio = null;
+function sndStop() {
+  if (sndAudio) { sndAudio.pause(); sndAudio = null; }
+  document.querySelectorAll('.sound-row.playing').forEach((n) => n.classList.remove('playing'));
+}
+function sndPlay(s, row) {
+  sndStop();
+  const src = soundSrc(s);
+  if (!src) { $('sendErr').textContent = 'This sound must be picked again (file not kept).'; return; }
+  sndAudio = new Audio(src); sndAudio.volume = siteVolume;
+  row?.classList.add('playing');
+  sndAudio.play().catch(() => {});
+  sndAudio.onended = () => sndStop();
+}
+
+function renderSounds() {
+  const box = $('soundsList'); box.replaceChildren();
+  $('soundsBadge').textContent = String(sounds.length);
+  $('soundName').textContent = sounds.length
+    ? `${sounds.length} sound${sounds.length > 1 ? 's' : ''} attached`
+    : 'No sound';
+  if (!sounds.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sounds-empty';
+    empty.textContent = 'No sound. Add a file or pick one from the soundboard.';
+    box.appendChild(empty);
+    return;
+  }
+  sounds.forEach((s, i) => {
+    const row = document.createElement('div'); row.className = 'sound-row';
+    const name = document.createElement('span');
+    name.className = 'sname'; name.textContent = s.name || 'Sound'; name.title = s.name || 'Sound';
+    const tag = document.createElement('span');
+    tag.className = 'stag'; tag.textContent = s.assetId ? 'library' : (s.file ? 'file' : 'missing');
+    const play = document.createElement('button');
+    play.textContent = '▶'; play.title = 'Preview';
+    play.onclick = () => sndPlay(s, row);
+    const del = document.createElement('button');
+    del.textContent = '🗑'; del.title = 'Remove this sound';
+    del.onclick = () => removeSound(i);
+    row.append(name, tag, play, del);
+    box.appendChild(row);
+  });
+}
+
+async function pickSoundFile() {
   const f = await api.pickFile(); if (!f) return;
   const ext = f.name.split('.').pop().toLowerCase();
-  sound = { file: f, name: f.name, mime: 'audio/' + ext };
-  $('soundName').textContent = f.name;
-  commit();
+  addSound({ file: f, name: f.name, mime: 'audio/' + ext });
+}
+$('soundPick').onclick = pickSoundFile;
+$('soundsAdd').onclick = pickSoundFile;
+// Raccourci vers le popover Son (recherche myinstants + bibliothèque + partagés).
+// stopPropagation : sans lui, le listener global « clic en dehors » refermerait
+// le popover dans la foulée (ce bouton n'est ni #tbSound ni dans #soundPop).
+$('soundsBrowse').onclick = (e) => {
+  e.stopPropagation();
+  closeToolPops('soundPop');
+  $('soundPop').classList.remove('hidden');
 };
+renderSounds();
 
 // ---- Volume d'écoute LOCAL du site (coin bas droit) ---------------------
 // Master volume appliqué à tout ce qui est joué DANS l'éditeur (aperçus,
@@ -906,10 +996,11 @@ function sbPlay(src, node) {
   sbAudio.onended = () => sbStop();
 }
 function useLibrarySound(asset) {
-  sound = { assetId: asset.id, name: asset.name, url: asset.url || null }; // url : pour l'aperçu
-  $('soundName').textContent = `${asset.name} (library)`;
-  commit();
-  $('sbMsg').textContent = `Son « ${asset.name} » attached to the meme.`;
+  // url : sert à l'aperçu local ; le serveur, lui, retrouve le son par son id.
+  const added = addSound({ assetId: asset.id, name: asset.name, url: asset.url || null });
+  $('sbMsg').textContent = added
+    ? `Sound « ${asset.name} » attached (${sounds.length}/${MAX_SOUNDS}).`
+    : `« ${asset.name} » is already attached (or ${MAX_SOUNDS} sounds max).`;
 }
 
 $('sbSearch').onclick = doSbSearch;
@@ -1213,7 +1304,10 @@ function buildPayload() {
   const opts = { ...options };
   opts.box = placeBox;
   const payload = { text: textForModeration(), options: opts, groups: [...selGroups], mentions: [...selMembers] };
-  if (sound) payload.sound = sound.assetId ? { assetId: sound.assetId, name: sound.name } : { file: sound.file, mime: sound.mime, filename: sound.name };
+  // Sons : assets de la bibliothèque (par id) et/ou fichiers encore présents.
+  payload.sounds = sounds
+    .filter((s) => s.assetId || s.file)
+    .map((s) => (s.assetId ? { assetId: s.assetId, name: s.name } : { file: s.file, mime: s.mime, filename: s.name }));
 
   // Calques vidéo/gif visibles, avec fichier encore présent, en z croissant.
   const vids = els.filter((e) => !e.hidden && e.type === 'video' && mediaFiles.get(e.id)?.file)
@@ -1289,27 +1383,243 @@ $('sendBtn').onclick = async () => {
   } catch (e) { $('sendErr').textContent = e.message; btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }
 };
 
-// Enregistrer en bibliothèque (via modale — window.prompt n'existe pas dans Electron).
-$('saveBtn').onclick = () => {
+// ---- Bibliothèque de memes enregistrés ---------------------------------
+// Un meme enregistré = son RENDU (image, déjà transcodé côté serveur, renvoyé
+// tel quel) + sa SCÈNE (calques, réglages d'affichage) pour pouvoir le rouvrir
+// et le retoucher. Les fichiers locaux (calques vidéo, fond vidéo/son, son
+// fichier) ne sont pas sérialisables : ils sont aplatis dans le rendu et
+// signalés à l'utilisateur avant l'enregistrement.
+let currentAsset = null;   // meme actuellement ouvert depuis la bibliothèque
+let libMemes = [];
+let libFavOnly = false;
+const LIB_MAX_SCENE_MB = 8;   // doit rester ≤ MAX_ASSET_DATA_BYTES côté serveur
+
+function unsavableParts() {
+  const parts = [];
+  if (els.some((e) => !e.hidden && e.type === 'video')) parts.push('video/GIF layers');
+  if (base.mode === 'media' && base.media && !base.media.dataUrl) parts.push('the video/sound background');
+  // Un son fichier n'est pas stocké : seuls les sons de la bibliothèque le sont.
+  if (sounds.some((s) => !s.assetId)) parts.push('sound files (only library sounds are kept)');
+  return parts;
+}
+
+// Scène débarrassée de tout ce qui n'a pas survécu à la sérialisation : ce qui
+// est rouvert correspond alors exactement à la vignette enregistrée.
+function sceneForSave() {
+  const s = JSON.parse(snapshot());
+  s.els = s.els.filter((e) => e.type !== 'video');
+  if (s.base.media && !s.base.media.dataUrl) {
+    s.base.media = null;
+    if (s.base.mode === 'media') s.base.mode = 'none';
+  }
+  s.sounds = (s.sounds || []).filter((x) => x.assetId);
+  return s;
+}
+
+function openSaveModal() {
   $('sendErr').textContent = '';
   if (!hasContent()) { $('sendErr').textContent = 'Nothing to save.'; return; }
-  $('saveName').value = 'My meme'; $('saveErr').textContent = '';
-  $('saveModal').classList.remove('hidden'); $('saveName').focus();
-};
+  $('saveName').value = currentAsset ? currentAsset.name : 'My meme';
+  $('saveErr').textContent = '';
+  $('saveReplaceWrap').classList.toggle('hidden', !currentAsset);
+  if (currentAsset) { $('saveReplace').checked = true; $('saveReplaceName').textContent = currentAsset.name; }
+  const parts = unsavableParts();
+  const warn = $('saveWarn');
+  warn.classList.toggle('hidden', !parts.length);
+  warn.textContent = parts.length
+    ? `⚠️ ${parts.join(' and ')} cannot be saved: the meme is stored as a still image (text, pictures, drawing) plus its settings.`
+    : '';
+  $('saveModal').classList.remove('hidden');
+  $('saveName').focus();
+}
+$('saveBtn').onclick = openSaveModal;
 $('saveCancel').onclick = () => $('saveModal').classList.add('hidden');
 $('saveOk').onclick = async () => {
   const name = ($('saveName').value || 'Meme').trim();
   const btn = $('saveOk'); btn.disabled = true; btn.textContent = '…';
+  $('saveErr').textContent = '';
   try {
-    const p = buildPayload();
-    const media = p.media?.dataUrl ? { dataUrl: p.media.dataUrl, filename: 'meme.png' } : null;
-    await api.addAsset({ kind: 'meme', name, media, data: { text: p.text, options: p.options } });
-    $('saveModal').classList.add('hidden'); refreshStorage();
-    $('sendErr').style.color = 'var(--success)'; $('sendErr').textContent = 'Saved to your library ✓';
+    // Rendu aplati : ce qui est enregistré est toujours une image, donc
+    // toujours renvoyable directement depuis la bibliothèque (pas de
+    // composition vidéo à rejouer côté serveur).
+    const media = { dataUrl: bake(false), filename: 'meme.png' };
+    const data = {
+      text: textForModeration(),
+      options: { ...options, box: placeBox, bakedText: true },
+      scene: sceneForSave(),
+      // Sons rejoués à l'identique quand le meme est renvoyé depuis la bibliothèque.
+      soundAssetIds: sounds.filter((s) => s.assetId).map((s) => s.assetId),
+    };
+    const sceneMb = JSON.stringify(data).length / 1048576;
+    if (sceneMb > LIB_MAX_SCENE_MB) {
+      throw new Error(`This meme is too heavy to be saved (${sceneMb.toFixed(1)} MB of layers, max ${LIB_MAX_SCENE_MB} MB). Remove or shrink some images.`);
+    }
+    const replace = currentAsset && $('saveReplace').checked;
+    const r = replace
+      ? await api.replaceAsset(currentAsset.id, { kind: 'meme', name, media, data })
+      : await api.addAsset({ kind: 'meme', name, media, data });
+    currentAsset = { id: r.id || currentAsset?.id, name };
+    $('saveModal').classList.add('hidden');
+    refreshStorage();
+    libMemes = [];   // liste à recharger au prochain affichage
+    $('sendErr').style.color = 'var(--success)';
+    $('sendErr').textContent = replace ? 'Meme updated in your library ✓' : 'Saved to your library ✓';
     setTimeout(() => { $('sendErr').style.color = ''; $('sendErr').textContent = ''; }, 2500);
   } catch (e) { $('saveErr').textContent = e.message; }
   finally { btn.disabled = false; btn.textContent = 'Save'; }
 };
+
+// --- Modale « Mes memes » ------------------------------------------------
+$('tbLibrary').onclick = () => openLibrary();
+$('libClose').onclick = () => $('libModal').classList.add('hidden');
+$('libSearch').oninput = () => renderMemeLib();
+$('libFavOnly').onclick = () => {
+  libFavOnly = !libFavOnly;
+  $('libFavOnly').textContent = libFavOnly ? '★' : '☆';
+  $('libFavOnly').classList.toggle('active', libFavOnly);
+  renderMemeLib();
+};
+
+async function openLibrary() {
+  $('libModal').classList.remove('hidden');
+  $('libMsg').textContent = '';
+  $('libTargetBadge').textContent = $('targetBadge').textContent;
+  $('libGrid').innerHTML = '<div class="lib-empty">Loading…</div>';
+  await loadMemeLib();
+}
+
+async function loadMemeLib() {
+  try { libMemes = await api.listAssets('meme'); }
+  catch (e) { libMemes = []; $('libMsg').textContent = e.message; }
+  renderMemeLib();
+}
+
+function renderMemeLib() {
+  const box = $('libGrid'); box.replaceChildren();
+  const q = ($('libSearch').value || '').trim().toLowerCase();
+  let list = libMemes.slice();
+  if (libFavOnly) list = list.filter((a) => a.data?.favorite);
+  if (q) list = list.filter((a) => (a.name || '').toLowerCase().includes(q));
+  list.sort((a, b) => (b.data?.favorite ? 1 : 0) - (a.data?.favorite ? 1 : 0));
+
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'lib-empty';
+    empty.textContent = libMemes.length
+      ? 'No meme matches this filter.'
+      : 'No saved meme yet — compose one and hit 💾 Save.';
+    box.appendChild(empty);
+    return;
+  }
+  for (const a of list) box.appendChild(memeCard(a));
+}
+
+function memeCard(a) {
+  const card = document.createElement('div'); card.className = 'lib-card';
+
+  if (a.url) {
+    const img = document.createElement('img');
+    img.className = 'lib-thumb'; img.src = a.url; img.alt = a.name; img.loading = 'lazy';
+    img.title = 'Open in the editor';
+    img.onclick = () => openMemeAsset(a);
+    card.appendChild(img);
+  } else {
+    const ph = document.createElement('div');
+    ph.className = 'lib-thumb empty'; ph.textContent = 'No preview';
+    card.appendChild(ph);
+  }
+
+  const head = document.createElement('div'); head.className = 'lib-head';
+  const fav = document.createElement('button');
+  fav.className = 'lib-fav' + (a.data?.favorite ? ' on' : '');
+  fav.textContent = a.data?.favorite ? '★' : '☆';
+  fav.title = a.data?.favorite ? 'Remove from favorites' : 'Add to favorites';
+  fav.onclick = async () => {
+    const next = !a.data?.favorite;
+    try { await api.updateAsset(a.id, { favorite: next }); a.data = { ...(a.data || {}), favorite: next }; renderMemeLib(); }
+    catch (e) { $('libMsg').textContent = e.message; }
+  };
+  const name = document.createElement('span');
+  name.className = 'lib-name'; name.textContent = a.name; name.title = a.name;
+  head.append(fav, name);
+
+  const meta = document.createElement('div'); meta.className = 'lib-meta';
+  meta.textContent = `${new Date(a.createdAt).toLocaleDateString()} · ${a.sizeMb} MB`
+    + (a.data?.hasScene ? '' : ' · not editable');
+
+  const actions = document.createElement('div'); actions.className = 'lib-actions';
+  const edit = document.createElement('button');
+  edit.className = 'btn btn-ghost'; edit.textContent = '✏️ Edit'; edit.title = 'Reopen in the editor';
+  edit.disabled = !a.data?.hasScene;
+  edit.onclick = () => openMemeAsset(a);
+  const send = document.createElement('button');
+  send.className = 'btn btn-primary'; send.textContent = '🚀 Send'; send.title = 'Send as is';
+  send.onclick = () => sendMemeAsset(a, send);
+  const del = document.createElement('button');
+  del.className = 'btn btn-ghost'; del.textContent = '🗑'; del.title = 'Delete';
+  // Suppression irréversible → confirmation sur un second clic (pas de
+  // window.confirm : indisponible/bloquant selon l'hôte qui embarque l'éditeur).
+  let armed = false;
+  del.onclick = async () => {
+    if (!armed) { armed = true; del.textContent = 'Sure?'; setTimeout(() => { armed = false; del.textContent = '🗑'; }, 5000); return; }
+    del.disabled = true;
+    try {
+      await api.deleteAsset(a.id);
+      if (currentAsset?.id === a.id) currentAsset = null;
+      libMemes = libMemes.filter((x) => x.id !== a.id);
+      renderMemeLib(); refreshStorage();
+      $('libMsg').textContent = `« ${a.name} » deleted.`;
+    } catch (e) { $('libMsg').textContent = e.message; del.disabled = false; }
+  };
+  actions.append(edit, send, del);
+
+  card.append(head, meta, actions);
+  return card;
+}
+
+// Rouvre un meme enregistré dans l'éditeur (retouche puis renvoi/ré-enregistrement).
+async function openMemeAsset(a) {
+  $('libMsg').textContent = 'Opening…';
+  try {
+    const full = await api.getAsset(a.id);
+    const scene = full?.data?.scene;
+    if (!scene) { $('libMsg').textContent = 'This meme has no editable scene (saved with an older version). You can still send it.'; return; }
+    restore(JSON.stringify(scene));
+    // Les URL des sons étaient signées pour 2 h : on reprend celles de la
+    // bibliothèque courante, sinon l'aperçu resterait muet.
+    if (sounds.length) {
+      await loadLibrary();
+      const before = sounds.length;
+      sounds = sounds.filter((s) => {
+        const fresh = libSounds.find((x) => x.id === s.assetId);
+        if (fresh) { s.url = fresh.url; s.name = fresh.name; return true; }
+        return false;   // son supprimé de la bibliothèque depuis l'enregistrement
+      });
+      if (sounds.length < before) $('libMsg').textContent = 'Note: some attached sounds no longer exist.';
+      renderSounds();
+    }
+    pushHistory(); updateWeight();
+    currentAsset = { id: full.id, name: full.name };
+    $('libModal').classList.add('hidden');
+    $('sendErr').style.color = 'var(--success)';
+    $('sendErr').textContent = `« ${full.name} » opened — edit it, then send or save.`;
+    setTimeout(() => { $('sendErr').style.color = ''; $('sendErr').textContent = ''; }, 3000);
+  } catch (e) { $('libMsg').textContent = e.message; }
+}
+
+// Envoi direct, sans repasser par la scène : le serveur rejoue le rendu déjà
+// transcodé vers les destinataires sélectionnés dans le panneau.
+async function sendMemeAsset(a, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  $('libMsg').textContent = '';
+  try {
+    const r = await api.sendAsset(a.id, { groups: [...selGroups], mentions: [...selMembers] });
+    $('libMsg').textContent = r?.pending ? `« ${a.name} » pending moderation ⏳`
+      : r?.queued ? `« ${a.name} » queued (warmup) ⏳`
+        : `« ${a.name} » sent ✅`;
+  } catch (e) { $('libMsg').textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = '🚀 Send'; }
+}
 
 // Aperçu — rejoue le meme EXACTEMENT comme chez le destinataire :
 // position/taille (placement), animation d'entrée ET de sortie, vidéos en
@@ -1391,10 +1701,12 @@ function renderPreview() {
     if (cls) { st.classList.add(cls); st.style.animationDuration = `${options.animInMs || 350}ms`; }
     scr.appendChild(st);
 
-    // Son à l'apparition (fichier local ou asset de la bibliothèque).
-    if (sound) {
-      const src = sound.file ? URL.createObjectURL(sound.file) : sound.url;
-      if (src) { const a = new Audio(src); a._baseVol = vol; a.volume = localVol(vol); a.play().catch(() => {}); pvAudios.push(a); }
+    // Sons à l'apparition (fichiers locaux et/ou assets de la bibliothèque),
+    // joués ensemble comme chez le destinataire.
+    for (const s of sounds) {
+      const src = soundSrc(s);
+      if (!src) continue;
+      const a = new Audio(src); a._baseVol = vol; a.volume = localVol(vol); a.play().catch(() => {}); pvAudios.push(a);
     }
 
     // Fin après la durée réglée : animation de sortie puis disparition.

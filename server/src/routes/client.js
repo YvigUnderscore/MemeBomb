@@ -17,18 +17,24 @@ import { hashToken, randomToken } from '../crypto.js';
 import { getChannelGuidelines } from '../guidelines.js';
 import { effectiveFeatures } from '../features.js';
 import { processMedia, HttpError } from '../media.js';
-import { createAndDispatchMeme, signMediaUrl } from '../memeService.js';
+import { createAndDispatchMeme, signMediaUrl, MAX_SOUNDS } from '../memeService.js';
 import { createSchedule } from '../scheduler.js';
-import { removeMediaFile } from '../retention.js';
+import { removeMediaFile, soundPathsOf } from '../retention.js';
 import { pushPanel, invalidateBlocks } from '../wsHub.js';
 import { searchMyInstants, downloadMyInstants } from '../sounds.js';
 import { giphyEnabled, searchGiphy, fetchRemoteMedia } from '../webmedia.js';
 import { asyncHandler } from './helpers.js';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024, files: 10 } });
+// fieldSize : la scène d'un meme enregistré (calques + images en dataURL) part
+// dans le champ texte `data` — la limite multer par défaut (1 Mo) la tronquerait.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024, files: 10, fieldSize: 12 * 1024 * 1024 },
+});
 const memeFields = upload.fields([
-  { name: 'media', maxCount: 1 }, { name: 'overlay', maxCount: 1 }, { name: 'sound', maxCount: 1 },
+  { name: 'media', maxCount: 1 }, { name: 'overlay', maxCount: 1 },
+  { name: 'sound', maxCount: MAX_SOUNDS },   // plusieurs sons joués à l'apparition
   { name: 'layers', maxCount: 6 }, // composition multi-calques (fond + vidéos/gifs)
 ]);
 
@@ -49,6 +55,16 @@ function assetSoundInfo(device, assetId) {
   if (!a || !a.media_path) return null;
   if (!fs.existsSync(path.join(config.mediaDir, path.basename(a.media_path)))) return null;
   return { relPath: a.media_path, mime: a.media_mime };
+}
+
+// Sons de bibliothèque joints à un envoi : `soundAssetIds` (JSON array) et/ou
+// l'ancien champ unique `soundAssetId`. La source est soit un champ multipart
+// (chaîne JSON), soit la définition d'un meme enregistré (tableau déjà parsé).
+function assetSoundInfos(device, body) {
+  const list = Array.isArray(body.soundAssetIds) ? body.soundAssetIds : parseJSON(body.soundAssetIds, []);
+  const ids = [...list, ...(body.soundAssetId ? [body.soundAssetId] : [])];
+  return [...new Set(ids.map(String))].slice(0, MAX_SOUNDS)
+    .map((id) => assetSoundInfo(device, id)).filter(Boolean);
 }
 
 function clientConfigFor(channel, device) {
@@ -120,10 +136,10 @@ router.post('/meme', deviceAuth, memeFields, asyncHandler(async (req, res) => {
     text: req.body.text || '',
     mediaBuffer: f.media?.[0]?.buffer || null,
     overlayBuffer: f.overlay?.[0]?.buffer || null,
-    soundBuffer: f.sound?.[0]?.buffer || null,
+    soundBuffers: (f.sound || []).map((x) => x.buffer),
     layerBuffers: (f.layers || []).map((x) => x.buffer),
     comp: parseJSON(req.body.comp, null),
-    soundAsset: assetSoundInfo(req.device, req.body.soundAssetId),
+    soundAssets: assetSoundInfos(req.device, req.body),
     groupNames: parseJSON(req.body.groups, []).map(String),
     mentions: parseJSON(req.body.mentions, []).map(String),
     options: parseJSON(req.body.options, {}),
@@ -221,8 +237,96 @@ router.post('/sounds/import', deviceAuth, asyncHandler(async (req, res) => {
 }));
 
 // --- Bibliothèque (sons / memes) + quota --------------------------------
+// La scène d'un meme (calques, images en dataURL) est stockée dans `data` :
+// elle pèse autant qu'un fichier et compte donc dans le quota, sous peine
+// d'offrir un stockage illimité hors comptabilité.
+const MAX_ASSET_DATA_BYTES = 8 * 1048576;
+
+const dataBytes = (json) => Buffer.byteLength(String(json || ''), 'utf8');
+
+// media_size garde la taille du fichier transcodé ; le JSON `data` est pesé à
+// la volée (CAST en BLOB : LENGTH() compte des caractères, pas des octets).
 function usedBytes(channelId, owner) {
-  return db.prepare('SELECT COALESCE(SUM(media_size),0) s FROM assets WHERE channel_id = ? AND owner = ?').get(channelId, owner).s;
+  return db.prepare('SELECT COALESCE(SUM(media_size + LENGTH(CAST(data AS BLOB))),0) s FROM assets WHERE channel_id = ? AND owner = ?')
+    .get(channelId, owner).s;
+}
+
+// Média déjà transcodé d'un meme enregistré, si le fichier existe encore.
+function assetMediaInfo(row) {
+  if (!row.media_path) return null;
+  if (!fs.existsSync(path.join(config.mediaDir, path.basename(row.media_path)))) return null;
+  const data = parseJSON(row.data, {});
+  return { relPath: row.media_path, mime: row.media_mime, size: row.media_size || 0, type: data.mediaType || 'image' };
+}
+
+// Vue publique d'un asset. La scène (potentiellement lourde) n'est envoyée
+// que sur demande explicite (GET /assets/:id), jamais dans la liste.
+function assetView(a, { withScene = false } = {}) {
+  const data = parseJSON(a.data, {});
+  const { scene, ...rest } = data;
+  return {
+    id: a.id, kind: a.kind, name: a.name,
+    sizeMb: +(((a.media_size || 0) + dataBytes(a.data)) / 1048576).toFixed(2),
+    url: a.media_path ? signMediaUrl(a.media_path) : null, mime: a.media_mime,
+    data: withScene ? data : { ...rest, hasScene: !!scene },
+    createdAt: a.created_at,
+  };
+}
+
+function ownedAsset(req, id, kind = null) {
+  return db.prepare(`SELECT * FROM assets WHERE id = ? AND channel_id = ? AND owner = ?${kind ? ' AND kind = ?' : ''}`)
+    .get(...[id, req.device.channel_id, ownerOf(req.device), ...(kind ? [kind] : [])]);
+}
+
+// Transcode le média reçu et écrit l'asset (création ou remplacement), en
+// vérifiant le quota du propriétaire sur l'empreinte totale.
+async function writeAsset(req, { replace = null } = {}) {
+  const channel = channelOf(req);
+  const s = getChannelSettings(channel);
+  const owner = ownerOf(req.device);
+  const kind = ['sound', 'meme'].includes(req.body.kind) ? req.body.kind : (replace?.kind || 'sound');
+
+  const incoming = parseJSON(req.body.data, {});
+  // Un remplacement conserve les métadonnées de rangement (favori, catégorie).
+  const previous = replace ? parseJSON(replace.data, {}) : {};
+  const data = { ...incoming };
+  for (const k of ['favorite', 'category', 'mediaType']) {
+    if (previous[k] !== undefined && data[k] === undefined) data[k] = previous[k];
+  }
+  const json = JSON.stringify(data);
+  if (dataBytes(json) > MAX_ASSET_DATA_BYTES) {
+    throw new HttpError(413, `Meme too heavy to be saved (max ${Math.round(MAX_ASSET_DATA_BYTES / 1048576)} MB).`);
+  }
+
+  let media = null;
+  if (req.file?.buffer) {
+    const allowed = kind === 'sound' ? ['audio'] : ['image', 'gif', 'video', 'audio'];
+    media = await processMedia(req.file.buffer, { ...s, allowedTypes: allowed });
+    data.mediaType = media.type;
+  }
+  const finalJson = JSON.stringify(data);
+  // Empreinte de l'asset après écriture, l'ancienne version étant libérée.
+  const keptMediaSize = media ? media.size || 0 : (replace?.media_size || 0);
+  const freed = replace ? (replace.media_size || 0) + dataBytes(replace.data) : 0;
+  if ((usedBytes(channel.id, owner) - freed + keptMediaSize + dataBytes(finalJson)) > s.storageQuotaMb * 1048576) {
+    if (media) removeMediaFile(media.relPath);
+    throw new HttpError(413, `Storage quota exceeded (${s.storageQuotaMb} MB).`);
+  }
+
+  const name = (req.body.name || replace?.name || 'Sans nom').slice(0, 80);
+  if (replace) {
+    if (media) removeMediaFile(replace.media_path); // l'ancien rendu n'est plus référencé
+    db.prepare('UPDATE assets SET name = ?, media_path = ?, media_mime = ?, media_size = ?, data = ? WHERE id = ?')
+      .run(name, media?.relPath || replace.media_path, media?.mime || replace.media_mime, keptMediaSize,
+        finalJson, replace.id);
+    return { id: replace.id };
+  }
+  const id = nanoid(14);
+  db.prepare(`INSERT INTO assets (id, channel_id, owner, owner_name, kind, name, media_path, media_mime, media_size, data, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, channel.id, owner, req.device.name, kind, name,
+      media?.relPath || null, media?.mime || null, keptMediaSize, finalJson, now());
+  return { id };
 }
 
 router.get('/storage', deviceAuth, (req, res) => {
@@ -234,39 +338,59 @@ router.get('/assets', deviceAuth, (req, res) => {
   const kind = ['sound', 'meme'].includes(req.query.kind) ? req.query.kind : null;
   const rows = db.prepare(`SELECT * FROM assets WHERE channel_id = @cid AND owner = @owner ${kind ? 'AND kind = @kind' : ''} ORDER BY created_at DESC`)
     .all({ cid: req.device.channel_id, owner: ownerOf(req.device), kind });
-  res.json(rows.map((a) => ({
-    id: a.id, kind: a.kind, name: a.name, sizeMb: +(a.media_size / 1048576).toFixed(2),
-    url: a.media_path ? signMediaUrl(a.media_path) : null, mime: a.media_mime,
-    data: parseJSON(a.data, {}), createdAt: a.created_at,
-  })));
+  res.json(rows.map((a) => assetView(a)));
+});
+
+// Détail d'un asset, scène comprise : appelé quand on rouvre un meme enregistré
+// dans l'éditeur (la liste, elle, reste légère).
+router.get('/assets/:id', deviceAuth, (req, res) => {
+  const row = ownedAsset(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(assetView(row, { withScene: true }));
 });
 
 router.post('/assets', deviceAuth, upload.single('media'), asyncHandler(async (req, res) => {
+  res.status(201).json(await writeAsset(req));
+}));
+
+// Remplace le contenu d'un asset (meme retouché puis ré-enregistré sous le même
+// nom d'entrée) : nouveau rendu + nouvelle scène, favori/catégorie conservés.
+router.put('/assets/:id', deviceAuth, upload.single('media'), asyncHandler(async (req, res) => {
+  const row = ownedAsset(req, req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(await writeAsset(req, { replace: row }));
+}));
+
+// Envoi direct d'un meme de la bibliothèque : le rendu est déjà transcodé, on
+// le rejoue tel quel — mais via createAndDispatchMeme, donc whitelist,
+// rate-limit, modération, warmup et feature-flags s'appliquent comme un envoi normal.
+router.post('/assets/:id/send', deviceAuth, asyncHandler(async (req, res) => {
   const channel = channelOf(req);
-  const s = getChannelSettings(channel);
-  const owner = ownerOf(req.device);
-  const kind = ['sound', 'meme'].includes(req.body.kind) ? req.body.kind : 'sound';
-  let media = null;
-  if (req.file?.buffer) {
-    const allowed = kind === 'sound' ? ['audio'] : ['image', 'gif', 'video', 'audio'];
-    media = await processMedia(req.file.buffer, { ...s, allowedTypes: allowed });
-  }
-  const addSize = media?.size || 0;
-  if ((usedBytes(channel.id, owner) + addSize) > s.storageQuotaMb * 1048576) {
-    throw new HttpError(413, `Storage quota exceeded (${s.storageQuotaMb} MB).`);
-  }
-  const id = nanoid(14);
-  db.prepare(`INSERT INTO assets (id, channel_id, owner, owner_name, kind, name, media_path, media_mime, media_size, data, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, channel.id, owner, req.device.name, kind, (req.body.name || 'Sans nom').slice(0, 80),
-      media?.relPath || null, media?.mime || null, addSize, JSON.stringify(parseJSON(req.body.data, {})), now());
-  res.status(201).json({ id });
+  const row = ownedAsset(req, req.params.id, 'meme');
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const body = z.object({
+    groups: z.array(z.string().max(60)).max(30).optional().default([]),
+    mentions: z.array(z.string().max(40)).max(50).optional().default([]),
+  }).parse(req.body || {});
+  const data = parseJSON(row.data, {});
+  const media = assetMediaInfo(row);
+  if (!media && !data.text) throw new HttpError(410, 'This saved meme no longer has any content.');
+  const result = await createAndDispatchMeme({
+    channel, source: 'editor', sender: ownerOf(req.device), senderName: req.device.name,
+    discordId: req.device.discord_id || '',
+    text: data.text || '',
+    mediaAsset: media,
+    soundAssets: assetSoundInfos(req.device, data),
+    groupNames: body.groups.map(String),
+    mentions: body.mentions.map(String),
+    options: data.options || {},
+  });
+  res.status(201).json(result);
 }));
 
 // Métadonnées d'un asset (#9) : favori / catégorie / renommage.
 router.patch('/assets/:id', deviceAuth, asyncHandler((req, res) => {
-  const row = db.prepare('SELECT * FROM assets WHERE id = ? AND channel_id = ? AND owner = ?')
-    .get(req.params.id, req.device.channel_id, ownerOf(req.device));
+  const row = ownedAsset(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   const body = z.object({
     name: z.string().max(80).optional(),
@@ -282,8 +406,7 @@ router.patch('/assets/:id', deviceAuth, asyncHandler((req, res) => {
 }));
 
 router.delete('/assets/:id', deviceAuth, (req, res) => {
-  const row = db.prepare('SELECT * FROM assets WHERE id = ? AND channel_id = ? AND owner = ?')
-    .get(req.params.id, req.device.channel_id, ownerOf(req.device));
+  const row = ownedAsset(req, req.params.id);
   if (row) {
     removeMediaFile(row.media_path);
     db.prepare('DELETE FROM assets WHERE id = ?').run(row.id);
@@ -345,10 +468,10 @@ router.post('/schedules', deviceAuth, memeFields, asyncHandler(async (req, res) 
     text: req.body.text || '',
     mediaBuffer: f.media?.[0]?.buffer || null,
     overlayBuffer: f.overlay?.[0]?.buffer || null,
-    soundBuffer: f.sound?.[0]?.buffer || null,
+    soundBuffers: (f.sound || []).map((x) => x.buffer),
     layerBuffers: (f.layers || []).map((x) => x.buffer),
     comp: parseJSON(req.body.comp, null),
-    soundAsset: assetSoundInfo(req.device, req.body.soundAssetId),
+    soundAssets: assetSoundInfos(req.device, req.body),
     options: parseJSON(req.body.options, {}),
     groupNames: parseJSON(req.body.groups, []).map(String),
     mentions: parseJSON(req.body.mentions, []).map(String),
@@ -364,8 +487,9 @@ router.delete('/schedules/:id', deviceAuth, (req, res) => {
     // Le média a déjà été transcodé et écrit sur disque à la création (options.__prepared) :
     // s'il n'a jamais été diffusé, il n'est référencé par aucun meme et doit être nettoyé ici.
     removeMediaFile(row.media_path);
-    removeMediaFile(row.sound_path);
     const options = parseJSON(row.options, {});
+    for (const p of soundPathsOf(options)) removeMediaFile(p);
+    removeMediaFile(row.sound_path);   // schedules d'avant le multi-son
     if (options.overlayPath) removeMediaFile(options.overlayPath);
     db.prepare('DELETE FROM schedules WHERE id = ?').run(row.id);
   }

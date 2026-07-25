@@ -253,6 +253,41 @@ html, body { height: 100%; margin: 0; overflow: hidden; }
 }
 .gif-grid img:hover { border-color: var(--accent, #ff3b3b); transform: scale(1.03); }
 
+/* ---------- Sons attachés au meme (panneau droit, sous les calques) ---------- */
+.sounds-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow: auto; }
+.sound-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); }
+.sound-row .sname { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sound-row .stag { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px; }
+.sound-row button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 4px; }
+.sound-row button:hover { color: var(--ink); }
+.sound-row.playing { border-color: var(--accent); }
+.sounds-empty { color: var(--muted); font-size: 12px; padding: 6px; }
+
+/* ---------- Bibliothèque de memes enregistrés ---------- */
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+  max-height: 56vh;
+  overflow: auto;
+}
+.lib-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+.lib-card .lib-thumb {
+  width: 100%; aspect-ratio: 16/9; object-fit: contain; display: block; cursor: pointer;
+  background: repeating-linear-gradient(45deg,#101014,#101014 10px,#14141a 10px,#14141a 20px);
+}
+.lib-card .lib-thumb.empty { display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.lib-card .lib-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; }
+.lib-card .lib-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-card .lib-meta { color: var(--muted); font-size: 11px; padding: 2px 8px 6px; }
+.lib-card .lib-actions { display: flex; gap: 4px; padding: 0 6px 6px; }
+.lib-card .lib-actions .btn { flex: 1; padding: 5px 6px; font-size: 12px; }
+.lib-card button.lib-fav { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; }
+.lib-card button.lib-fav.on { color: var(--warning, #f59e0b); }
+.lib-empty { color: var(--muted); font-size: 13px; padding: 18px; text-align: center; grid-column: 1 / -1; }
+.save-warn { color: var(--warning, #f59e0b); font-size: 12px; line-height: 1.5; margin-top: 10px; }
+
 /* ---------- Responsive (desktop first, utilisable au téléphone) ---------- */
 @media (max-width: 920px) {
   html, body { overflow: auto; }

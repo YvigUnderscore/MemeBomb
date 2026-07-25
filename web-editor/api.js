@@ -62,11 +62,27 @@
     // Composition multi-calques : fichiers dans l'ordre de comp.layers (z croissant).
     if (p.layers) p.layers.forEach((l) => fd.append('layers', l.file, l.filename || 'layer'));
     if (p.comp) fd.append('comp', JSON.stringify(p.comp));
-    if (p.sound) {
-      if (p.sound.assetId) fd.append('soundAssetId', p.sound.assetId);
-      else if (p.sound.file) fd.append('sound', p.sound.file, p.sound.filename || 'sound');
-      else if (p.sound.dataUrl) fd.append('sound', dataURLtoBlob(p.sound.dataUrl), p.sound.filename || 'sound');
+    // Sons joués à l'apparition : plusieurs fichiers (champ `sound` répété)
+    // et/ou plusieurs assets de la bibliothèque (`soundAssetIds`).
+    const assetIds = [];
+    for (const s of p.sounds || (p.sound ? [p.sound] : [])) {
+      if (!s) continue;
+      if (s.assetId) assetIds.push(s.assetId);
+      else if (s.file) fd.append('sound', s.file, s.filename || 'sound');
+      else if (s.dataUrl) fd.append('sound', dataURLtoBlob(s.dataUrl), s.filename || 'sound');
     }
+    if (assetIds.length) fd.append('soundAssetIds', JSON.stringify(assetIds));
+    return fd;
+  }
+
+  // Asset de bibliothèque (son ou meme) → FormData : rendu + définition JSON.
+  function assetForm(p) {
+    const fd = new FormData();
+    fd.append('kind', p.kind || 'sound');
+    fd.append('name', p.name || '');
+    fd.append('data', JSON.stringify(p.data || {}));
+    if (p.media && p.media.dataUrl) fd.append('media', dataURLtoBlob(p.media.dataUrl), p.media.filename || 'meme.png');
+    else if (p.media && p.media.file) fd.append('media', p.media.file, p.media.filename || 'media');
     return fd;
   }
 
@@ -100,13 +116,13 @@
     getGuidelines: async () => { const c = await getConfig(); return { text: c.guidelines, requireAccept: c.settings.requireGuidelinesAccept, acceptedAt: localStorage.getItem('md_gl_accepted') }; },
     acceptGuidelines: async () => { localStorage.setItem('md_gl_accepted', String(Date.now())); return true; },
     listAssets: (kind) => api('GET', '/api/client/assets' + (kind ? '?kind=' + encodeURIComponent(kind) : '')),
-    addAsset: (p) => {
-      const fd = new FormData();
-      fd.append('kind', p.kind || 'sound'); fd.append('name', p.name || ''); fd.append('data', JSON.stringify(p.data || {}));
-      if (p.media && p.media.dataUrl) fd.append('media', dataURLtoBlob(p.media.dataUrl), p.media.filename || 'meme.png');
-      else if (p.media && p.media.file) fd.append('media', p.media.file, p.media.filename || 'media');
-      return api('POST', '/api/client/assets', { form: fd });
-    },
+    // Détail d'un asset, scène comprise (la liste ne la transporte pas).
+    getAsset: (id) => api('GET', '/api/client/assets/' + encodeURIComponent(id)),
+    addAsset: (p) => api('POST', '/api/client/assets', { form: assetForm(p) }),
+    // Ré-enregistre un meme existant (retouché) au lieu d'en créer un doublon.
+    replaceAsset: (id, p) => api('PUT', '/api/client/assets/' + encodeURIComponent(id), { form: assetForm(p) }),
+    // Renvoie un meme de la bibliothèque sans repasser par l'éditeur.
+    sendAsset: (id, p) => api('POST', '/api/client/assets/' + encodeURIComponent(id) + '/send', { json: p || {} }),
     deleteAsset: (id) => api('DELETE', '/api/client/assets/' + encodeURIComponent(id)),
     updateAsset: (id, patch) => api('PATCH', '/api/client/assets/' + encodeURIComponent(id), { json: patch }),
     searchSounds: (q) => api('GET', '/api/client/sounds/search?q=' + encodeURIComponent(q || '')).catch((e) => ({ error: e.message })),
