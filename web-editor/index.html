@@ -3,8 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="theme.css" />
-  <link rel="stylesheet" href="editor.css" />
+  <!-- L'éditeur est servi à la fois sur /compose et /compose/ : sans cette base,
+       les chemins relatifs de la page sans slash final visent la RACINE, où le
+       fallback SPA renvoie du HTML — CSS et scripts de l'éditeur silencieusement
+       ignorés (page brute, sans style). -->
+  <base href="/compose/" />
+  <!-- __V__ est remplacé à la volée par le serveur (date du fichier le plus récent
+       de /compose). Sans ce versionnage, un CDN garde ces fichiers en cache d'après
+       leur extension et l'éditeur tourne avec un CSS/JS plus ancien que la page. -->
+  <link rel="stylesheet" href="theme.css?v=__V__" />
+  <link rel="stylesheet" href="editor.css?v=__V__" />
   <title>MemeDrop — Editor</title>
 </head>
 <body>
@@ -296,19 +304,41 @@
 
   <!-- My saved memes (per-user library) -->
   <div class="modal hidden" id="libModal">
-    <div class="modal-box card pad" style="max-width:860px">
-      <h3>My saved memes</h3>
-      <div class="row" style="gap:6px; align-items:center; margin-top:0">
-        <input id="libSearch" class="input" placeholder="Search…" style="flex:1" />
-        <button class="btn btn-ghost" id="libFavOnly" title="Favorites only">☆</button>
-        <span class="badge" id="libTargetBadge">everyone</span>
+    <div class="modal-box card lib-modal">
+      <header class="lib-top">
+        <div class="lib-title">
+          <h3>My library</h3>
+          <span class="lib-count" id="libCount"></span>
+        </div>
+        <button class="lib-x" id="libClose" title="Close">✕</button>
+      </header>
+
+      <div class="lib-tools">
+        <div class="lib-search">
+          <span aria-hidden="true">🔎</span>
+          <input id="libSearch" placeholder="Search a meme…" autocomplete="off" />
+          <button class="lib-clear hidden" id="libSearchClear" title="Clear">✕</button>
+        </div>
+        <div class="lib-filters" role="group" aria-label="Filter">
+          <button class="lib-chip active" id="libFilterAll" data-filter="all">All</button>
+          <button class="lib-chip" id="libFilterFav" data-filter="fav">★ Favorites</button>
+          <button class="lib-chip" id="libFilterAnim" data-filter="anim">▶ Animated</button>
+        </div>
+        <select id="libSort" class="input lib-sort" title="Sort">
+          <option value="recent">Newest first</option>
+          <option value="name">Name (A–Z)</option>
+          <option value="size">Heaviest first</option>
+        </select>
       </div>
-      <div class="muted small" style="margin-top:6px">
-        ✏️ reopens the meme in the editor · 🚀 sends it as is to the selected recipients · 🗑 deletes it.
+
+      <div class="lib-body">
+        <div id="libGrid" class="lib-grid"></div>
       </div>
-      <div id="libGrid" class="lib-grid"></div>
-      <div class="muted small" id="libMsg"></div>
-      <div class="row end"><button class="btn btn-primary" id="libClose">Close</button></div>
+
+      <footer class="lib-foot">
+        <span class="lib-hint">Sending to <b id="libTargetBadge">everyone</b></span>
+        <span class="lib-msg" id="libMsg"></span>
+      </footer>
     </div>
   </div>
 
@@ -316,7 +346,9 @@
   <div class="ctx-menu hidden" id="ctxMenu"></div>
 
   <input type="file" id="hiddenFile" class="hidden">
-  <!-- api.js resolves auth (member pairing OR panel editor token) then loads editor.js -->
-  <script src="api.js"></script>
+  <!-- api.js resolves auth (member pairing OR panel editor token) then loads editor.js
+       with the SAME version tag: an api.js older than editor.js breaks the page
+       (missing methods, sounds silently dropped). -->
+  <script src="api.js?v=__V__"></script>
 </body>
 </html>

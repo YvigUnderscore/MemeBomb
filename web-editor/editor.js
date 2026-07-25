@@ -1359,6 +1359,26 @@ function buildPayload() {
   return payload;
 }
 
+// Rendu à stocker dans la bibliothèque. Une scène animée (calques vidéo/GIF ou
+// fond vidéo/GIF) est enregistrée comme les envois : le serveur compose les
+// calques en une vidéo. Sinon on garde l'image aplatie, plus légère.
+// → { layers, comp, overlay } pour l'animé, { media } pour le statique.
+function assetRender() {
+  const p = buildPayload();
+  if (p.layers) return { layers: p.layers, comp: p.comp, overlay: p.overlay || null };
+  // Fond vidéo/GIF seul : un unique calque plein cadre, l'habillage statique
+  // (textes, images, dessin) restant gravé par-dessus via l'overlay.
+  const bg = p.media;
+  if (bg?.file && ['video', 'gif'].includes(base.media?.kind)) {
+    return {
+      layers: [{ file: bg.file, filename: bg.filename }],
+      comp: { v: 1, bg: null, durationS: options.durationS, layers: [{ full: true }] },
+      overlay: p.overlay || null,
+    };
+  }
+  return { media: { dataUrl: bake(false), filename: 'meme.png' } };
+}
+
 // Blob depuis un dataURL (le calque « under » part en fichier multipart).
 function dataURLtoBlobLocal(dataUrl) {
   const [meta, b64] = String(dataUrl).split(',');
@@ -1391,15 +1411,22 @@ $('sendBtn').onclick = async () => {
 // signalés à l'utilisateur avant l'enregistrement.
 let currentAsset = null;   // meme actuellement ouvert depuis la bibliothèque
 let libMemes = [];
-let libFavOnly = false;
 const LIB_MAX_SCENE_MB = 8;   // doit rester ≤ MAX_ASSET_DATA_BYTES côté serveur
 
+// Scène animée : le rendu enregistré sera une vidéo composée par le serveur.
+function isAnimatedScene() {
+  return els.some((e) => !e.hidden && e.type === 'video' && mediaFiles.get(e.id)?.file)
+    || (base.mode === 'media' && ['video', 'gif'].includes(base.media?.kind) && base.media?.file);
+}
+
+// Avertissements affichés avant l'enregistrement. Le RENDU garde tout (l'animation
+// comprise) ; ce sont les sources rééditables qui ne survivent pas toutes.
 function unsavableParts() {
   const parts = [];
-  if (els.some((e) => !e.hidden && e.type === 'video')) parts.push('video/GIF layers');
-  if (base.mode === 'media' && base.media && !base.media.dataUrl) parts.push('the video/sound background');
+  if (isAnimatedScene()) parts.push('video/GIF layers stay in the rendered video but cannot be edited again');
+  if (base.mode === 'media' && base.media?.kind === 'audio') parts.push('the sound background is not kept');
   // Un son fichier n'est pas stocké : seuls les sons de la bibliothèque le sont.
-  if (sounds.some((s) => !s.assetId)) parts.push('sound files (only library sounds are kept)');
+  if (sounds.some((s) => !s.assetId)) parts.push('sound files are not kept (only library sounds are)');
   return parts;
 }
 
@@ -1426,9 +1453,7 @@ function openSaveModal() {
   const parts = unsavableParts();
   const warn = $('saveWarn');
   warn.classList.toggle('hidden', !parts.length);
-  warn.textContent = parts.length
-    ? `⚠️ ${parts.join(' and ')} cannot be saved: the meme is stored as a still image (text, pictures, drawing) plus its settings.`
-    : '';
+  warn.textContent = parts.length ? `⚠️ ${parts.join(' · ')}.` : '';
   $('saveModal').classList.remove('hidden');
   $('saveName').focus();
 }
@@ -1439,10 +1464,10 @@ $('saveOk').onclick = async () => {
   const btn = $('saveOk'); btn.disabled = true; btn.textContent = '…';
   $('saveErr').textContent = '';
   try {
-    // Rendu aplati : ce qui est enregistré est toujours une image, donc
-    // toujours renvoyable directement depuis la bibliothèque (pas de
-    // composition vidéo à rejouer côté serveur).
-    const media = { dataUrl: bake(false), filename: 'meme.png' };
+    // Rendu figé une fois pour toutes (image aplatie, ou vidéo composée si la
+    // scène est animée) : renvoyable et téléchargeable tel quel, sans
+    // recomposition côté serveur.
+    const render = assetRender();
     const data = {
       text: textForModeration(),
       options: { ...options, box: placeBox, bakedText: true },
@@ -1456,8 +1481,8 @@ $('saveOk').onclick = async () => {
     }
     const replace = currentAsset && $('saveReplace').checked;
     const r = replace
-      ? await api.replaceAsset(currentAsset.id, { kind: 'meme', name, media, data })
-      : await api.addAsset({ kind: 'meme', name, media, data });
+      ? await api.replaceAsset(currentAsset.id, { kind: 'meme', name, ...render, data })
+      : await api.addAsset({ kind: 'meme', name, ...render, data });
     currentAsset = { id: r.id || currentAsset?.id, name };
     $('saveModal').classList.add('hidden');
     refreshStorage();
@@ -1469,16 +1494,41 @@ $('saveOk').onclick = async () => {
   finally { btn.disabled = false; btn.textContent = 'Save'; }
 };
 
-// --- Modale « Mes memes » ------------------------------------------------
+// --- Modale « Ma bibliothèque » ------------------------------------------
+let libFilter = 'all';   // all | fav | anim
+let libSort = 'recent';  // recent | name | size
+
 $('tbLibrary').onclick = () => openLibrary();
-$('libClose').onclick = () => $('libModal').classList.add('hidden');
-$('libSearch').oninput = () => renderMemeLib();
-$('libFavOnly').onclick = () => {
-  libFavOnly = !libFavOnly;
-  $('libFavOnly').textContent = libFavOnly ? '★' : '☆';
-  $('libFavOnly').classList.toggle('active', libFavOnly);
+$('libClose').onclick = () => closeLibrary();
+$('libModal').onclick = (e) => { if (e.target === $('libModal')) closeLibrary(); };
+$('libSearch').oninput = () => {
+  $('libSearchClear').classList.toggle('hidden', !$('libSearch').value);
   renderMemeLib();
 };
+$('libSearchClear').onclick = () => {
+  $('libSearch').value = ''; $('libSearchClear').classList.add('hidden');
+  renderMemeLib(); $('libSearch').focus();
+};
+$('libSort').onchange = () => { libSort = $('libSort').value; renderMemeLib(); };
+for (const b of document.querySelectorAll('.lib-chip')) {
+  b.onclick = () => {
+    libFilter = b.dataset.filter;
+    document.querySelectorAll('.lib-chip').forEach((x) => x.classList.toggle('active', x === b));
+    renderMemeLib();
+  };
+}
+// Échap ferme la bibliothèque, sauf pendant un renommage (l'input le gère).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('libModal').classList.contains('hidden')) return;
+  if (document.activeElement?.classList.contains('lib-name')) return;
+  closeLibrary();
+});
+
+function closeLibrary() {
+  $('libModal').classList.add('hidden');
+  // Les vignettes vidéo continueraient à tourner en arrière-plan.
+  $('libGrid').replaceChildren();
+}
 
 async function openLibrary() {
   $('libModal').classList.remove('hidden');
@@ -1494,20 +1544,33 @@ async function loadMemeLib() {
   renderMemeLib();
 }
 
+const isAnimatedAsset = (a) => a.data?.mediaType === 'video' || a.data?.mediaType === 'gif';
+
 function renderMemeLib() {
   const box = $('libGrid'); box.replaceChildren();
   const q = ($('libSearch').value || '').trim().toLowerCase();
   let list = libMemes.slice();
-  if (libFavOnly) list = list.filter((a) => a.data?.favorite);
+  if (libFilter === 'fav') list = list.filter((a) => a.data?.favorite);
+  else if (libFilter === 'anim') list = list.filter(isAnimatedAsset);
   if (q) list = list.filter((a) => (a.name || '').toLowerCase().includes(q));
-  list.sort((a, b) => (b.data?.favorite ? 1 : 0) - (a.data?.favorite ? 1 : 0));
+
+  const by = {
+    recent: (a, b) => b.createdAt - a.createdAt,
+    name: (a, b) => (a.name || '').localeCompare(b.name || ''),
+    size: (a, b) => b.sizeMb - a.sizeMb,
+  }[libSort];
+  // Favoris en tête quel que soit le tri : c'est le geste de rangement du panneau.
+  list.sort((a, b) => ((b.data?.favorite ? 1 : 0) - (a.data?.favorite ? 1 : 0)) || by(a, b));
+
+  $('libCount').textContent = libMemes.length
+    ? `${list.length}${list.length === libMemes.length ? '' : ` / ${libMemes.length}`} meme${libMemes.length > 1 ? 's' : ''}`
+    : '';
 
   if (!list.length) {
     const empty = document.createElement('div');
     empty.className = 'lib-empty';
-    empty.textContent = libMemes.length
-      ? 'No meme matches this filter.'
-      : 'No saved meme yet — compose one and hit 💾 Save.';
+    if (!libMemes.length) empty.innerHTML = '<b>Your library is empty</b>Compose a meme, then hit 💾 Save to keep it here — ready to resend in one click.';
+    else empty.innerHTML = '<b>Nothing matches</b>Try another search or filter.';
     box.appendChild(empty);
     return;
   }
@@ -1516,52 +1579,105 @@ function renderMemeLib() {
 
 function memeCard(a) {
   const card = document.createElement('div'); card.className = 'lib-card';
+  const animated = isAnimatedAsset(a);
 
-  if (a.url) {
+  // --- Vignette ---
+  const shot = document.createElement('div'); shot.className = 'lib-shot';
+  if (a.url && animated) {
+    // Aperçu animé au survol seulement : une grille de vidéos en lecture
+    // continue coûterait cher et ferait clignoter la modale.
+    const v = document.createElement('video');
+    v.src = a.url; v.muted = true; v.loop = true; v.playsInline = true; v.preload = 'metadata';
+    shot.onmouseenter = () => v.play?.().catch(() => {});
+    shot.onmouseleave = () => { try { v.pause(); v.currentTime = 0; } catch { /* ignore */ } };
+    shot.appendChild(v);
+  } else if (a.url) {
     const img = document.createElement('img');
-    img.className = 'lib-thumb'; img.src = a.url; img.alt = a.name; img.loading = 'lazy';
-    img.title = 'Open in the editor';
-    img.onclick = () => openMemeAsset(a);
-    card.appendChild(img);
+    img.src = a.url; img.alt = a.name; img.loading = 'lazy';
+    shot.appendChild(img);
   } else {
-    const ph = document.createElement('div');
-    ph.className = 'lib-thumb empty'; ph.textContent = 'No preview';
-    card.appendChild(ph);
+    shot.classList.add('empty'); shot.textContent = 'No preview';
   }
+  shot.title = a.data?.hasScene ? 'Open in the editor' : 'This meme has no editable scene';
+  shot.onclick = () => (a.data?.hasScene ? openMemeAsset(a) : downloadMemeAsset(a));
 
-  const head = document.createElement('div'); head.className = 'lib-head';
+  const badges = document.createElement('div'); badges.className = 'lib-badges';
+  if (animated) { const b = document.createElement('span'); b.className = 'lib-badge'; b.textContent = '▶ ANIMATED'; badges.appendChild(b); }
+  if (a.data?.soundAssetIds?.length) {
+    const b = document.createElement('span'); b.className = 'lib-badge';
+    b.textContent = `🔊 ${a.data.soundAssetIds.length}`; badges.appendChild(b);
+  }
+  if (badges.children.length) shot.appendChild(badges);
+
   const fav = document.createElement('button');
   fav.className = 'lib-fav' + (a.data?.favorite ? ' on' : '');
   fav.textContent = a.data?.favorite ? '★' : '☆';
   fav.title = a.data?.favorite ? 'Remove from favorites' : 'Add to favorites';
-  fav.onclick = async () => {
+  fav.onclick = async (e) => {
+    e.stopPropagation();
     const next = !a.data?.favorite;
     try { await api.updateAsset(a.id, { favorite: next }); a.data = { ...(a.data || {}), favorite: next }; renderMemeLib(); }
-    catch (e) { $('libMsg').textContent = e.message; }
+    catch (err) { $('libMsg').textContent = err.message; }
   };
-  const name = document.createElement('span');
-  name.className = 'lib-name'; name.textContent = a.name; name.title = a.name;
-  head.append(fav, name);
+  shot.appendChild(fav);
+
+  // --- Nom, renommable sur place ---
+  const info = document.createElement('div'); info.className = 'lib-info';
+  const name = document.createElement('input');
+  name.className = 'lib-name'; name.value = a.name; name.title = 'Click to rename'; name.maxLength = 80;
+  const commitName = async () => {
+    const v = name.value.trim();
+    if (!v || v === a.name) { name.value = a.name; return; }
+    try { await api.updateAsset(a.id, { name: v }); a.name = v; $('libMsg').textContent = `Renamed to « ${v} ».`; }
+    catch (e) { name.value = a.name; $('libMsg').textContent = e.message; }
+  };
+  name.onblur = commitName;
+  name.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); name.blur(); }
+    else if (e.key === 'Escape') { e.stopPropagation(); name.value = a.name; name.blur(); }
+  };
+  info.appendChild(name);
 
   const meta = document.createElement('div'); meta.className = 'lib-meta';
-  meta.textContent = `${new Date(a.createdAt).toLocaleDateString()} · ${a.sizeMb} MB`
-    + (a.data?.hasScene ? '' : ' · not editable');
+  meta.textContent = [
+    new Date(a.createdAt).toLocaleDateString(),
+    `${a.sizeMb} MB`,
+    a.data?.hasScene ? null : 'not editable',
+  ].filter(Boolean).join(' · ');
 
+  // --- Actions ---
   const actions = document.createElement('div'); actions.className = 'lib-actions';
+  const send = document.createElement('button');
+  send.className = 'btn btn-primary lib-send'; send.textContent = '🚀 Send'; send.title = 'Send as is to the selected recipients';
+  send.onclick = () => sendMemeAsset(a, send);
+
   const edit = document.createElement('button');
-  edit.className = 'btn btn-ghost'; edit.textContent = '✏️ Edit'; edit.title = 'Reopen in the editor';
+  edit.className = 'lib-icon'; edit.textContent = '✏️';
+  // Les calques vidéo ne sont pas sérialisables : un meme animé se rouvre sur sa
+  // partie fixe (textes, images, réglages), pas sur son mouvement.
+  edit.title = !a.data?.hasScene ? 'No editable scene (saved with an older version)'
+    : animated ? 'Reopen in the editor (without the video layers)'
+      : 'Reopen in the editor';
   edit.disabled = !a.data?.hasScene;
   edit.onclick = () => openMemeAsset(a);
-  const send = document.createElement('button');
-  send.className = 'btn btn-primary'; send.textContent = '🚀 Send'; send.title = 'Send as is';
-  send.onclick = () => sendMemeAsset(a, send);
+
+  const dl = document.createElement('button');
+  dl.className = 'lib-icon'; dl.textContent = '📥';
+  dl.title = `Download (${assetExt(a).toUpperCase()})`;
+  dl.disabled = !a.url;
+  dl.onclick = () => downloadMemeAsset(a, dl);
+
   const del = document.createElement('button');
-  del.className = 'btn btn-ghost'; del.textContent = '🗑'; del.title = 'Delete';
+  del.className = 'lib-icon danger'; del.textContent = '🗑'; del.title = 'Delete';
   // Suppression irréversible → confirmation sur un second clic (pas de
   // window.confirm : indisponible/bloquant selon l'hôte qui embarque l'éditeur).
   let armed = false;
   del.onclick = async () => {
-    if (!armed) { armed = true; del.textContent = 'Sure?'; setTimeout(() => { armed = false; del.textContent = '🗑'; }, 5000); return; }
+    if (!armed) {
+      armed = true; del.textContent = '✓?'; del.classList.add('armed'); del.title = 'Click again to delete';
+      setTimeout(() => { armed = false; del.textContent = '🗑'; del.classList.remove('armed'); del.title = 'Delete'; }, 5000);
+      return;
+    }
     del.disabled = true;
     try {
       await api.deleteAsset(a.id);
@@ -1571,10 +1687,60 @@ function memeCard(a) {
       $('libMsg').textContent = `« ${a.name} » deleted.`;
     } catch (e) { $('libMsg').textContent = e.message; del.disabled = false; }
   };
-  actions.append(edit, send, del);
+  actions.append(send, edit, dl, del);
 
-  card.append(head, meta, actions);
+  card.append(shot, info, meta, actions);
   return card;
+}
+
+// Format du fichier téléchargé. Les memes animés sortent tels quels (MP4, ou
+// WebM quand le fond est transparent). Les memes fixes sont stockés en WebP par
+// le serveur : on les reconvertit en PNG, seul format universellement accepté
+// partout où l'on colle une image (et la transparence survit).
+function assetExt(a) {
+  const m = (a.mime || '').toLowerCase();
+  return { 'video/mp4': 'mp4', 'video/webm': 'webm', 'image/gif': 'gif' }[m]
+    || (m.startsWith('video/') ? 'mp4' : 'png');
+}
+
+// WebP → PNG via canvas (le rendu est same-origin, le canvas reste exploitable).
+function webpToPng(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement('canvas');
+      cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+      cv.getContext('2d').drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      cv.toBlob((png) => resolve(png || blob), 'image/png');
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(blob); };
+    img.src = url;
+  });
+}
+
+// Téléchargement du rendu. On passe par un blob : l'attribut `download` seul
+// ignorerait le nom de fichier voulu sur certains hôtes, et l'URL signée
+// expire — mieux vaut échouer visiblement ici qu'ouvrir un onglet vide.
+async function downloadMemeAsset(a, btn) {
+  if (!a.url) { $('libMsg').textContent = 'This meme has no media to download.'; return; }
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  $('libMsg').textContent = '';
+  try {
+    const res = await fetch(a.url);
+    if (!res.ok) throw new Error(`Download failed (HTTP ${res.status}).`);
+    let blob = await res.blob();
+    if (assetExt(a) === 'png' && blob.type !== 'image/png') blob = await webpToPng(blob);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(a.name || 'meme').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60)}.${assetExt(a)}`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    $('libMsg').textContent = `Downloaded « ${a.name} ».`;
+  } catch (e) { $('libMsg').textContent = e.message; }
+  finally { if (btn) { btn.disabled = false; btn.textContent = '📥'; } }
 }
 
 // Rouvre un meme enregistré dans l'éditeur (retouche puis renvoi/ré-enregistrement).

@@ -76,6 +76,8 @@
   }
 
   // Asset de bibliothèque (son ou meme) → FormData : rendu + définition JSON.
+  // Un meme animé arrive sous forme de calques (+ comp/overlay), comme un envoi :
+  // le serveur les compose en vidéo et stocke ce rendu.
   function assetForm(p) {
     const fd = new FormData();
     fd.append('kind', p.kind || 'sound');
@@ -83,6 +85,9 @@
     fd.append('data', JSON.stringify(p.data || {}));
     if (p.media && p.media.dataUrl) fd.append('media', dataURLtoBlob(p.media.dataUrl), p.media.filename || 'meme.png');
     else if (p.media && p.media.file) fd.append('media', p.media.file, p.media.filename || 'media');
+    if (p.layers) p.layers.forEach((l) => fd.append('layers', l.file, l.filename || 'layer'));
+    if (p.comp) fd.append('comp', JSON.stringify(p.comp));
+    if (p.overlay && p.overlay.dataUrl) fd.append('overlay', dataURLtoBlob(p.overlay.dataUrl), p.overlay.filename || 'overlay.png');
     return fd;
   }
 
@@ -144,9 +149,15 @@
   };
 
   // --- Boot ---------------------------------------------------------------
-  // Cache-busting : le script est injecté dynamiquement, un rechargement forcé
-  // ne le rafraîchit pas — on force une version à chaque chargement de page.
-  function loadEditor() { const s = document.createElement('script'); s.src = 'editor.js?v=' + Date.now(); document.body.appendChild(s); }
+  // Cache-busting : editor.js est injecté dynamiquement, un rechargement forcé
+  // ne le rafraîchit pas. On reprend la version de NOTRE propre URL (posée par
+  // le serveur dans index.html) : les deux fichiers restent ainsi d'une seule
+  // et même génération, jamais un api.js périmé avec un editor.js à jour.
+  const VERSION = (() => {
+    try { return new URL(document.currentScript.src).searchParams.get('v') || ''; }
+    catch { return ''; }
+  })() || String(Date.now());
+  function loadEditor() { const s = document.createElement('script'); s.src = 'editor.js?v=' + encodeURIComponent(VERSION); document.body.appendChild(s); }
 
   async function bootPanel() {
     try {

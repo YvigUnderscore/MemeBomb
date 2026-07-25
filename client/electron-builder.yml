@@ -7,11 +7,13 @@ productName: MemeDrop
 copyright: MIT © MemeDrop
 
 # Publication des releases sur GitHub (npm run release, avec GH_TOKEN défini).
-# Le client vérifie github.com/YvigUnderscore/MemeDrop/releases/latest au démarrage.
+# Le client vérifie github.com/YvigUnderscore/MemeBomb/releases/latest au démarrage.
+# Dépôt renommé MemeDrop → MemeBomb : l'ancien nom ne répond plus qu'en 301, que
+# ni electron-builder ni l'updater ne suivent — il doit rester à jour ici.
 publish:
   provider: github
   owner: YvigUnderscore
-  repo: MemeDrop
+  repo: MemeBomb
 
 directories:
   output: dist

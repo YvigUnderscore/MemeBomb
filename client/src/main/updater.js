@@ -8,7 +8,10 @@
 const https = require('node:https');
 const { app, Notification, shell } = require('electron');
 
-const REPO = 'YvigUnderscore/MemeDrop';
+// Dépôt renommé MemeDrop → MemeBomb. fetchLatestRelease rejette tout statut
+// ≠ 200 : la redirection 301 de l'ancien nom n'est PAS suivie, ce nom doit
+// donc correspondre au dépôt réel.
+const REPO = 'YvigUnderscore/MemeBomb';
 const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASES_URL = `https://github.com/${REPO}/releases/latest`;
 

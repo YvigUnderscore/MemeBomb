@@ -162,6 +162,29 @@ describe('bibliothèque de memes', () => {
     expect(r.body.data.mediaType).toBe('image'); // média conservé
   });
 
+  // Le bouton de téléchargement de la bibliothèque choisit son extension d'après
+  // ces deux champs : sans eux, un meme animé serait téléchargé en .png.
+  it('expose le type et le mime du rendu dans la liste', async () => {
+    const list = await request(app).get('/api/client/assets?kind=meme').set('X-Device-Token', deviceToken).expect(200);
+    const a = list.body.find((x) => x.id === memeId);
+    expect(a.mime).toBe('image/webp');
+    expect(a.data.mediaType).toBe('image');
+    expect(a.url).toBeTruthy();
+  });
+
+  it('renomme un meme sans toucher à son rendu', async () => {
+    const before = db.prepare('SELECT media_path FROM assets WHERE id = ?').get(memeId).media_path;
+    await request(app).patch(`/api/client/assets/${memeId}`).set('X-Device-Token', deviceToken)
+      .send({ name: 'Renommé depuis la bibliothèque' }).expect(200);
+    const r = await request(app).get(`/api/client/assets/${memeId}`).set('X-Device-Token', deviceToken).expect(200);
+    expect(r.body.name).toBe('Renommé depuis la bibliothèque');
+    expect(r.body.data.scene).toBeTruthy();          // la scène survit au renommage
+    expect(db.prepare('SELECT media_path FROM assets WHERE id = ?').get(memeId).media_path).toBe(before);
+    // Un nom vide viderait la carte : refusé côté serveur, pas seulement dans l'UI.
+    await request(app).patch(`/api/client/assets/${memeId}`).set('X-Device-Token', deviceToken)
+      .send({ name: '' }).expect(400);
+  });
+
   it('isole les bibliothèques entre propriétaires', async () => {
     const list = await request(app).get('/api/client/assets?kind=meme').set('X-Device-Token', otherToken).expect(200);
     expect(list.body.find((x) => x.id === memeId)).toBeUndefined();

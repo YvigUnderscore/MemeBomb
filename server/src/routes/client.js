@@ -15,8 +15,9 @@ import { config } from '../config.js';
 import { deviceAuth } from '../auth.js';
 import { hashToken, randomToken } from '../crypto.js';
 import { getChannelGuidelines } from '../guidelines.js';
-import { effectiveFeatures } from '../features.js';
-import { processMedia, HttpError } from '../media.js';
+import { effectiveFeatures, assertFeature } from '../features.js';
+import { processMedia, storeComposedVideo, HttpError } from '../media.js';
+import { composeLayers } from '../composer.js';
 import { createAndDispatchMeme, signMediaUrl, MAX_SOUNDS } from '../memeService.js';
 import { createSchedule } from '../scheduler.js';
 import { removeMediaFile, soundPathsOf } from '../retention.js';
@@ -36,6 +37,11 @@ const memeFields = upload.fields([
   { name: 'media', maxCount: 1 }, { name: 'overlay', maxCount: 1 },
   { name: 'sound', maxCount: MAX_SOUNDS },   // plusieurs sons joués à l'apparition
   { name: 'layers', maxCount: 6 }, // composition multi-calques (fond + vidéos/gifs)
+]);
+// Un meme enregistré est soit un rendu déjà aplati (`media`), soit — quand la
+// scène est animée — les mêmes calques que pour un envoi, composés en vidéo.
+const assetFields = upload.fields([
+  { name: 'media', maxCount: 1 }, { name: 'overlay', maxCount: 1 }, { name: 'layers', maxCount: 6 },
 ]);
 
 // Propriétaire logique : appareil virtuel (éditeur panel) → owner explicite ;
@@ -298,10 +304,24 @@ async function writeAsset(req, { replace = null } = {}) {
     throw new HttpError(413, `Meme too heavy to be saved (max ${Math.round(MAX_ASSET_DATA_BYTES / 1048576)} MB).`);
   }
 
+  const f = req.files || {};
+  const layerBuffers = (f.layers || []).map((x) => x.buffer);
   let media = null;
-  if (req.file?.buffer) {
+  if (kind === 'meme' && layerBuffers.length) {
+    // Meme ANIMÉ : mêmes calques que pour un envoi, composés en une vidéo une
+    // fois pour toutes. On stocke le rendu vidéo — d'où un vrai MP4/WebM au
+    // téléchargement, et un renvoi direct sans re-transcodage.
+    assertFeature(channel, owner, 'video', 'Vidéos/GIF');
+    const composed = await composeLayers(layerBuffers, parseJSON(req.body.comp, {}), f.overlay?.[0]?.buffer || null, s);
+    // Fond « Aucun » → WebM alpha stocké tel quel (un ré-encodage h264 détruirait
+    // la transparence) ; fond couleur → MP4, qui repasse par le pipeline normal.
+    media = composed.transparent
+      ? await storeComposedVideo(composed.buffer, composed.mime)
+      : await processMedia(composed.buffer, { ...s, allowedTypes: ['video'] });
+    data.mediaType = media.type || 'video';
+  } else if (f.media?.[0]?.buffer) {
     const allowed = kind === 'sound' ? ['audio'] : ['image', 'gif', 'video', 'audio'];
-    media = await processMedia(req.file.buffer, { ...s, allowedTypes: allowed });
+    media = await processMedia(f.media[0].buffer, { ...s, allowedTypes: allowed });
     data.mediaType = media.type;
   }
   const finalJson = JSON.stringify(data);
@@ -349,13 +369,13 @@ router.get('/assets/:id', deviceAuth, (req, res) => {
   res.json(assetView(row, { withScene: true }));
 });
 
-router.post('/assets', deviceAuth, upload.single('media'), asyncHandler(async (req, res) => {
+router.post('/assets', deviceAuth, assetFields, asyncHandler(async (req, res) => {
   res.status(201).json(await writeAsset(req));
 }));
 
 // Remplace le contenu d'un asset (meme retouché puis ré-enregistré sous le même
 // nom d'entrée) : nouveau rendu + nouvelle scène, favori/catégorie conservés.
-router.put('/assets/:id', deviceAuth, upload.single('media'), asyncHandler(async (req, res) => {
+router.put('/assets/:id', deviceAuth, assetFields, asyncHandler(async (req, res) => {
   const row = ownedAsset(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   res.json(await writeAsset(req, { replace: row }));
@@ -393,7 +413,7 @@ router.patch('/assets/:id', deviceAuth, asyncHandler((req, res) => {
   const row = ownedAsset(req, req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   const body = z.object({
-    name: z.string().max(80).optional(),
+    name: z.string().min(1).max(80).optional(),
     favorite: z.boolean().optional(),
     category: z.string().max(40).optional(),
   }).parse(req.body || {});

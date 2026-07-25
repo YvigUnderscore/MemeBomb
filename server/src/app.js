@@ -118,25 +118,55 @@ export function createApp() {
   app.use('/api', (req, res) => res.status(404).json({ error: 'Route not found' }));
 
   // --- Panel web (SPA) --------------------------------------------------
+  // Interdit toute mise en cache, navigateur ET CDN intermédiaire. Cloudflare
+  // n'honore `Cache-Control` que si « Origin Cache Control » est actif ; les
+  // en-têtes ciblés (CDN-Cache-Control, puis le préfixé) sont, eux, toujours lus.
+  const setNoStore = (res) => {
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
+  };
+
+  // Version des fichiers de l'éditeur : date du plus récent d'entre eux, donc
+  // stable tant que rien ne bouge et renouvelée à chaque déploiement.
+  const ASSET_VERSION = (() => {
+    const dir = path.join(PUBLIC_DIR, 'compose');
+    try {
+      const times = fs.readdirSync(dir).map((f) => fs.statSync(path.join(dir, f)).mtimeMs);
+      if (times.length) return String(Math.round(Math.max(...times)));
+    } catch { /* éditeur non buildé : la route renvoie déjà un 404 explicite */ }
+    return String(Date.now());
+  })();
+
   if (fs.existsSync(PUBLIC_DIR)) {
+    // Éditeur web (page autonome, hors SPA React) : /compose → compose/index.html.
+    // `__V__` y est remplacé par la version des assets : les CSS/JS de l'éditeur
+    // n'ont pas de hash dans leur nom, cette version est ce qui garantit qu'un
+    // redéploiement invalide vraiment ce qui est en cache, chez le client comme
+    // sur le CDN. La CSP interdisant l'inline, l'injection se fait ici — donc
+    // avant express.static, qui servirait sinon le fichier brut.
+    app.get(['/compose', '/compose/', '/compose/index.html'], (req, res) => {
+      const f = path.join(PUBLIC_DIR, 'compose', 'index.html');
+      if (!fs.existsSync(f)) return res.status(404).send('Web editor not built (server/public/compose/).');
+      setNoStore(res);
+      res.type('html').send(fs.readFileSync(f, 'utf8').replaceAll('__V__', ASSET_VERSION));
+    });
     app.use(express.static(PUBLIC_DIR, {
       index: false,
       maxAge: '1h',
       // Fichiers de l'éditeur (/compose) : non versionnés (pas de hash dans le
-      // nom) → no-cache, sinon les navigateurs gardent l'ancien JS/CSS 1 h
+      // nom) → no-store, sinon les navigateurs gardent l'ancien JS/CSS 1 h
       // après une mise à jour (editor.js est injecté dynamiquement : même un
       // rechargement forcé ne le rafraîchit pas). Les assets du panel, eux,
       // ont un hash dans le nom et restent cachés.
+      // CDN-Cache-Control : un CDN devant l'origine (Cloudflare) met en cache
+      // les .js/.css d'après leur EXTENSION et ignore le Cache-Control d'origine.
+      // Sans ça, api.js peut être servi dans une version plus ancienne
+      // qu'editor.js (lui cache-busté) → méthodes manquantes et sons ignorés.
       setHeaders: (res, filePath) => {
-        if (filePath.includes(`${path.sep}compose${path.sep}`)) res.setHeader('Cache-Control', 'no-cache');
+        if (filePath.includes(`${path.sep}compose${path.sep}`)) setNoStore(res);
       },
     }));
-    // Éditeur web (page autonome, hors SPA React) : /compose → compose/index.html.
-    app.get(['/compose', '/compose/'], (req, res) => {
-      const f = path.join(PUBLIC_DIR, 'compose', 'index.html');
-      if (fs.existsSync(f)) { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(f); }
-      else res.status(404).send('Web editor not built (server/public/compose/).');
-    });
     app.get('*', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
   } else {
     app.get('*', (req, res) => res.status(200).send(
