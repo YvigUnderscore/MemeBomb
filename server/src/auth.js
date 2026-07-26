@@ -117,12 +117,55 @@ export function requireAdmin(req, res, next) {
 }
 
 // Staff = admin ou modérateur. Les comptes 'member' (connexion Discord des
-// membres whitelist) n'accèdent qu'à leur profil, jamais aux écrans de gestion.
+// membres whitelist) n'accèdent qu'à leur profil, jamais aux écrans globaux
+// (tableau de bord, modération, guidelines, comptes).
 export function requireStaff(req, res, next) {
-  if (req.user?.role !== 'admin' && req.user?.role !== 'moderator') {
+  if (!isGlobalStaff(req.user)) {
     return res.status(403).json({ error: 'Moderators only' });
   }
   next();
+}
+
+// ---- Modérateurs « de channel » ----------------------------------------
+// Un membre promu modérateur dans la whitelist d'un channel (onglet Whitelist)
+// gère CE channel depuis le panel, et lui seul. Son compte reste 'member' :
+// le lien entre la session panel et la whitelist se fait par le discord_id.
+export function isGlobalStaff(user) {
+  return user?.role === 'admin' || user?.role === 'moderator';
+}
+
+export function moderatedChannelIds(user) {
+  if (!user?.discord_id) return [];
+  return db.prepare(
+    "SELECT channel_id FROM whitelist WHERE discord_id = ? AND role = 'moderator' AND banned = 0",
+  ).all(String(user.discord_id)).map((r) => r.channel_id);
+}
+
+export function isChannelModerator(user, channelId) {
+  if (!user?.discord_id) return false;
+  const row = db.prepare(
+    "SELECT 1 FROM whitelist WHERE discord_id = ? AND channel_id = ? AND role = 'moderator' AND banned = 0",
+  ).get(String(user.discord_id), channelId);
+  return !!row;
+}
+
+/**
+ * Gestion d'UN channel : staff global, ou modérateur de ce channel précis.
+ * À placer APRÈS `loadChannel` — sans `req.channel`, il n'y a pas de portée à
+ * vérifier et la garde refuserait tout le monde sauf le staff global.
+ */
+export function requireChannelStaff(req, res, next) {
+  if (isGlobalStaff(req.user)) return next();
+  if (req.channel && isChannelModerator(req.user, req.channel.id)) return next();
+  return res.status(403).json({ error: 'Moderators only' });
+}
+
+// Accès aux écrans de channels en général (liste, valeurs par défaut) : staff
+// global, ou modérateur d'au moins un channel. Le filtrage par channel se fait
+// ensuite route par route via `requireChannelStaff`.
+export function requireAnyChannelStaff(req, res, next) {
+  if (isGlobalStaff(req.user) || moderatedChannelIds(req.user).length > 0) return next();
+  return res.status(403).json({ error: 'Moderators only' });
 }
 
 // ---- Token éditeur éphémère (panel → éditeur web) ----------------------

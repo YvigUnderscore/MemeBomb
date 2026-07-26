@@ -1,10 +1,12 @@
 // Tests des correctifs de sécurité de ce round : garde CSRF (Origin),
-// réglages de channel réservés aux admins, état OAuth désactivé, et
+// portée des modérateurs de channel, état OAuth désactivé, et
 // unité du module discordOAuth (state anti-CSRF).
 import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
+import bcrypt from 'bcryptjs';
 import { createApp } from '../src/app.js';
 import { ensureAdmin } from '../src/auth.js';
+import { db, now } from '../src/db.js';
 import { createState, verifyState, buildAuthorizeUrl, isOAuthEnabled } from '../src/discordOAuth.js';
 
 const app = createApp();
@@ -49,7 +51,7 @@ describe('garde CSRF (vérification Origin)', () => {
   });
 });
 
-describe('réglages de channel réservés aux admins', () => {
+describe('réglages de channel : réservés à qui gère le channel', () => {
   let mod;
   beforeAll(async () => {
     await admin.post('/api/auth/users').send({ username: 'modsec', password: 'modpass123', role: 'moderator' }).expect(201);
@@ -57,13 +59,87 @@ describe('réglages de channel réservés aux admins', () => {
     await mod.post('/api/auth/login').send({ username: 'modsec', password: 'modpass123' }).expect(200);
   });
 
-  it('un modérateur ne peut PAS modifier les réglages (mode de modération)', async () => {
-    await mod.put(`/api/channels/${channelId}/settings`).send({ moderationMode: 'off' }).expect(403);
+  it('un modérateur panel peut modifier les réglages', async () => {
+    const r = await mod.put(`/api/channels/${channelId}/settings`).send({ moderationMode: 'off' }).expect(200);
+    expect(r.body.moderationMode).toBe('off');
   });
 
-  it('un admin le peut', async () => {
+  it('un admin le peut aussi', async () => {
     const r = await admin.put(`/api/channels/${channelId}/settings`).send({ moderationMode: 'filter' }).expect(200);
     expect(r.body.moderationMode).toBe('filter');
+  });
+
+  it('créer ou supprimer un channel reste réservé aux admins', async () => {
+    await mod.post('/api/channels').send({ name: 'Interdit' }).expect(403);
+    await mod.delete(`/api/channels/${channelId}`).expect(403);
+  });
+});
+
+// Un membre promu modérateur dans la whitelist d'un channel gère CE channel
+// depuis le panel — et rien d'autre : ni les autres channels, ni les écrans
+// globaux (comptes, réglages serveur).
+describe('modérateur de channel (promu dans la whitelist)', () => {
+  const DISCORD_ID = '987654321098765';
+  let chanMod; let otherId;
+
+  beforeAll(async () => {
+    const other = await admin.post('/api/channels').send({ name: 'Sec Autre' }).expect(201);
+    otherId = other.body.id;
+    // Compte 'member' lié à ce Discord. Mot de passe réel (au lieu du '!' posé
+    // par le flux OAuth) pour pouvoir ouvrir une session dans le test.
+    db.prepare('INSERT INTO users (username, password_hash, role, discord_id, created_at) VALUES (?,?,?,?,?)')
+      .run('chanmod', bcrypt.hashSync('chanmodpass123', 4), 'member', DISCORD_ID, now());
+    await admin.post(`/api/channels/${channelId}/whitelist`)
+      .send({ discordId: DISCORD_ID, role: 'moderator' }).expect(201);
+    chanMod = request.agent(app);
+    await chanMod.post('/api/auth/login').send({ username: 'chanmod', password: 'chanmodpass123' }).expect(200);
+  });
+
+  it('annonce ses channels modérés dans /auth/me (contrat du panel)', async () => {
+    const r = await chanMod.get('/api/auth/me').expect(200);
+    expect(r.body.user.role).toBe('member');
+    expect(r.body.user.moderatedChannels).toEqual([channelId]);
+  });
+
+  it('ne liste que les channels qu\'il modère', async () => {
+    const r = await chanMod.get('/api/channels').expect(200);
+    expect(r.body.map((c) => c.id)).toEqual([channelId]);
+  });
+
+  it('gère son channel : whitelist, groupes, appareils, soundboard, historique', async () => {
+    await chanMod.get(`/api/channels/${channelId}`).expect(200);
+    await chanMod.get(`/api/channels/${channelId}/whitelist`).expect(200);
+    await chanMod.get(`/api/channels/${channelId}/groups`).expect(200);
+    await chanMod.get(`/api/channels/${channelId}/devices`).expect(200);
+    await chanMod.get(`/api/channels/${channelId}/soundboard`).expect(200);
+    await chanMod.get(`/api/channels/${channelId}/memes`).expect(200);
+  });
+
+  it('modifie les réglages et la config Discord de son channel', async () => {
+    const r = await chanMod.put(`/api/channels/${channelId}/settings`).send({ maxTextLength: 123 }).expect(200);
+    expect(r.body.maxTextLength).toBe(123);
+    await chanMod.put(`/api/channels/${channelId}/discord`).send({ guildId: '123456789012345' }).expect(200);
+  });
+
+  it('est refusé sur un channel qu\'il ne modère pas', async () => {
+    await chanMod.get(`/api/channels/${otherId}`).expect(403);
+    await chanMod.get(`/api/channels/${otherId}/whitelist`).expect(403);
+    await chanMod.put(`/api/channels/${otherId}/settings`).send({ maxTextLength: 50 }).expect(403);
+  });
+
+  it('n\'atteint ni les écrans globaux ni la création de channel', async () => {
+    await chanMod.get('/api/auth/users').expect(403);
+    await chanMod.get('/api/settings/stats').expect(403);
+    await chanMod.post('/api/channels').send({ name: 'Interdit' }).expect(403);
+    await chanMod.delete(`/api/channels/${channelId}`).expect(403);
+  });
+
+  it('perd l\'accès dès qu\'il est rétrogradé', async () => {
+    const wl = await admin.get(`/api/channels/${channelId}/whitelist`).expect(200);
+    const row = wl.body.find((w) => w.discord_id === DISCORD_ID);
+    await admin.patch(`/api/channels/${channelId}/whitelist/${row.id}`).send({ role: 'user' }).expect(200);
+    await chanMod.get(`/api/channels/${channelId}`).expect(403);
+    await chanMod.get('/api/channels').expect(403);
   });
 });
 

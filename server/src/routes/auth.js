@@ -5,6 +5,7 @@ import { db, now, audit } from '../db.js';
 import { config } from '../config.js';
 import {
   verifyPassword, issueSession, panelAuth, requireAdmin, verifySessionUser, bumpUserEpoch,
+  moderatedChannelIds,
 } from '../auth.js';
 import { closePanelSessions } from '../wsHub.js';
 import {
@@ -51,6 +52,9 @@ router.get('/me', panelAuth, (req, res) => {
       discordAvatarUrl: avatarUrl,
       nameColor: u?.name_color || null,
       nameGlow: u?.name_glow || null,
+      // Channels dont ce compte est modérateur via la whitelist. Le panel s'en
+      // sert pour ouvrir les écrans de channel à un compte 'member'.
+      moderatedChannels: moderatedChannelIds(req.user),
     },
     oauth: { discordEnabled: isOAuthEnabled() },
   });
@@ -241,7 +245,13 @@ router.get('/discord/callback', asyncHandler(async (req, res) => {
   const jwtToken = issueSession(user);
   res.cookie('md_session', jwtToken, sessionCookieOpts());
   audit(user.username, 'auth.discord.login.ok');
-  return oauthResult(res, { ok: true, message: `Welcome ${profile.username}!`, to: user.role === 'member' ? '/profile' : '/' });
+  // Un membre atterrit sur son profil — sauf s'il modère un channel : sa page
+  // d'accueil est alors la liste de ses channels.
+  let to = '/';
+  if (user.role === 'member') {
+    to = moderatedChannelIds({ discord_id: profile.id }).length > 0 ? '/channels' : '/profile';
+  }
+  return oauthResult(res, { ok: true, message: `Welcome ${profile.username}!`, to });
 }));
 
 // Délier son compte Discord (depuis les réglages du profil).

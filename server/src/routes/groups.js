@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, now, audit } from '../db.js';
-import { panelAuth, requireStaff } from '../auth.js';
+import { panelAuth, requireChannelStaff } from '../auth.js';
 import { asyncHandler, loadChannel } from './helpers.js';
 
 // Monté sur /api/channels/:channelId/groups
 const router = Router({ mergeParams: true });
-router.use(panelAuth, requireStaff, loadChannel);
+router.use(panelAuth, loadChannel, requireChannelStaff);
 
 router.get('/', (req, res) => {
   const rows = db.prepare('SELECT * FROM mention_groups WHERE channel_id = ? ORDER BY name').all(req.channel.id);

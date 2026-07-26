@@ -13,7 +13,7 @@ import { Tooltip } from './ui.jsx';
 
 const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, key: 'd', staff: true },
-  { to: '/channels', label: 'Channels', icon: Hash, key: 'c', staff: true },
+  { to: '/channels', label: 'Channels', icon: Hash, key: 'c', channels: true },
   { to: '/hall', label: 'Hall of Memes', icon: Trophy, key: 'h' }, // accessible aussi aux membres
   { to: '/moderation', label: 'Moderation', icon: ShieldAlert, key: 'm', staff: true },
   { to: '/guidelines', label: 'Guidelines', icon: ScrollText, key: 'g', staff: true },
@@ -35,7 +35,7 @@ function ConnDot() {
 }
 
 export default function Layout({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, isAdmin, isStaff, canManageChannels } = useAuth();
   const { resolved, toggleTheme } = useTheme();
   const panelWS = usePanelWS();
   const navigate = useNavigate();
@@ -46,10 +46,12 @@ export default function Layout({ children }) {
   const [modBadge, setModBadge] = useState(0);
   const seq = useRef({ g: false, t: 0 });
 
-  // Les comptes 'member' ne voient que Profil (et Hall) ; Admin réservé aux admins.
+  // Les comptes 'member' ne voient que Profil et Hall — plus Channels s'ils
+  // modèrent au moins un channel. Admin reste réservé aux admins.
   const visibleNav = nav.filter((n) => {
-    if (user?.role === 'member') return !n.staff && !n.admin;
-    if (n.admin) return user?.role === 'admin';
+    if (n.admin) return isAdmin;
+    if (n.staff) return isStaff;
+    if (n.channels) return canManageChannels;
     return true;
   });
 

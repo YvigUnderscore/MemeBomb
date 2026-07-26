@@ -46,6 +46,12 @@ Ce document décrit les protections en place.
 
 - **Panel** : sessions JWT en cookie **httpOnly** + `SameSite=Lax` (`Secure` en HTTPS).
   Mots de passe hachés **bcrypt** (coût 12). Rôles `admin` / `moderator`.
+- **Portées** : `admin` (tout, dont créer/supprimer un channel et gérer les comptes),
+  `moderator` (tous les channels + écrans globaux), **modérateur de channel** — un
+  membre promu dans la whitelist d'un channel : il gère ce channel depuis le panel
+  (whitelist, réglages, groupes, appareils, soundboard, historique, bot Discord) et
+  **uniquement celui-là**. Il ne voit ni les autres channels ni les écrans globaux.
+  La portée est vérifiée côté serveur à chaque requête, pas seulement dans l'UI.
 - **Clients (devices)** : appairage par **code éphémère** (30 min, usage unique).
   Le client reçoit un **token opaque** ; le serveur n'en stocke que le **hash HMAC**.
   Révocation possible à tout moment depuis le panel.

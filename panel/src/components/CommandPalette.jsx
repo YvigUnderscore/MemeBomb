@@ -12,30 +12,36 @@ import { ChannelAPI } from '../lib/api.js';
 export default function CommandPalette({ open, onClose }) {
   const navigate = useNavigate();
   const { toggleTheme, density, setDensity } = useTheme();
-  const { logout } = useAuth();
+  const { logout, isStaff, canManageChannels } = useAuth();
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(0);
   const [channels, setChannels] = useState([]);
   const inputRef = useRef(null);
 
   useEffect(() => {
-    if (open) { setQ(''); setSel(0); ChannelAPI.list().then(setChannels).catch(() => {}); setTimeout(() => inputRef.current?.focus(), 30); }
-  }, [open]);
+    if (!open) return;
+    setQ(''); setSel(0);
+    if (canManageChannels) ChannelAPI.list().then(setChannels).catch(() => {});
+    setTimeout(() => inputRef.current?.focus(), 30);
+  }, [open, canManageChannels]);
 
   const go = (to) => { onClose(); navigate(to); };
+  // `staff` / `channels` : mêmes portées que la navigation — la palette ne doit
+  // pas proposer une page sur laquelle la route va rediriger.
   const commands = useMemo(() => [
-    { id: 'nav-dash', label: 'Dashboard', icon: LayoutDashboard, hint: 'Go to', run: () => go('/') },
-    { id: 'nav-channels', label: 'Channels', icon: Hash, hint: 'Go to', run: () => go('/channels') },
+    { id: 'nav-dash', label: 'Dashboard', icon: LayoutDashboard, hint: 'Go to', staff: true, run: () => go('/') },
+    { id: 'nav-channels', label: 'Channels', icon: Hash, hint: 'Go to', channels: true, run: () => go('/channels') },
     { id: 'nav-hall', label: 'Hall of Memes', icon: Trophy, hint: 'Go to', run: () => go('/hall') },
-    { id: 'nav-mod', label: 'Moderation', icon: ShieldAlert, hint: 'Go to', run: () => go('/moderation') },
-    { id: 'nav-guide', label: 'Guidelines', icon: ScrollText, hint: 'Go to', run: () => go('/guidelines') },
-    { id: 'nav-account', label: 'Accounts', icon: Users, hint: 'Go to', run: () => go('/account') },
+    { id: 'nav-mod', label: 'Moderation', icon: ShieldAlert, hint: 'Go to', staff: true, run: () => go('/moderation') },
+    { id: 'nav-guide', label: 'Guidelines', icon: ScrollText, hint: 'Go to', staff: true, run: () => go('/guidelines') },
+    { id: 'nav-account', label: 'Accounts', icon: Users, hint: 'Go to', staff: true, run: () => go('/account') },
     { id: 'act-theme', label: 'Toggle light / dark theme', icon: Moon, hint: 'Action', run: () => { toggleTheme(); onClose(); } },
     { id: 'act-density', label: `Density: switch to ${density === 'compact' ? 'comfortable' : 'compact'}`, icon: Rows3, hint: 'Action', run: () => { setDensity(density === 'compact' ? 'comfortable' : 'compact'); onClose(); } },
     { id: 'act-logout', label: 'Sign out', icon: LogOut, hint: 'Action', run: async () => { onClose(); await logout(); navigate('/login'); } },
-    { id: 'dev-components', label: 'Catalogue de composants (dev)', icon: Sparkles, hint: 'Dev', run: () => go('/_components') },
+    { id: 'dev-components', label: 'Catalogue de composants (dev)', icon: Sparkles, hint: 'Dev', staff: true, run: () => go('/_components') },
     ...channels.map((c) => ({ id: `ch-${c.id}`, label: `Channel : ${c.name}`, icon: Hash, hint: `/${c.slug}`, run: () => go(`/channels/${c.id}`) })),
-  ], [channels, density]); // eslint-disable-line react-hooks/exhaustive-deps
+  ].filter((c) => (c.staff ? isStaff : true) && (c.channels ? canManageChannels : true)),
+  [channels, density, isStaff, canManageChannels]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();

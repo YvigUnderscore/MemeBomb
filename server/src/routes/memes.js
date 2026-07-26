@@ -4,21 +4,23 @@ import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { db, now, audit, getChannelSettings } from '../db.js';
 import { config } from '../config.js';
-import { panelAuth, requireStaff } from '../auth.js';
+import { panelAuth, requireChannelStaff } from '../auth.js';
 import { createAndDispatchMeme, signMediaUrl, approveMeme, rejectMeme, resendMeme } from '../memeService.js';
 import { processMedia } from '../media.js';
 import { deleteAllMemes, removeMediaFile, soundPathsOf } from '../retention.js';
 import { asyncHandler, loadChannel } from './helpers.js';
 
 // Monté sur /api/channels/:channelId/
+// Toutes les routes portent sur un channel : `loadChannel` est fait une fois
+// ici, avant la garde de portée (qui a besoin de `req.channel`).
 const router = Router({ mergeParams: true });
-router.use(panelAuth, requireStaff);
+router.use(panelAuth, loadChannel, requireChannelStaff);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024, files: 1 } });
 const ALLOWED_EMOJI = ['😂', '❤️', '🔥', '💀', '👏', '😮', '👎', '🤡'];
 
 // Envoi d'un meme depuis le panel (modérateur/admin).
-router.post('/meme', loadChannel, upload.single('media'), asyncHandler(async (req, res) => {
+router.post('/meme', upload.single('media'), asyncHandler(async (req, res) => {
   const parseJSON = (v, d) => { try { return v ? JSON.parse(v) : d; } catch { return d; } };
   const result = await createAndDispatchMeme({
     channel: req.channel,
@@ -36,7 +38,7 @@ router.post('/meme', loadChannel, upload.single('media'), asyncHandler(async (re
 }));
 
 // Historique — avec filtres avancés (#12) et receipts/réactions (#2/#6).
-router.get('/memes', loadChannel, asyncHandler((req, res) => {
+router.get('/memes', asyncHandler((req, res) => {
   const { limit, offset, status, type, sender, q, from, to } = z.object({
     limit: z.coerce.number().min(1).max(100).default(30),
     offset: z.coerce.number().min(0).default(0),
@@ -84,7 +86,7 @@ router.get('/memes', loadChannel, asyncHandler((req, res) => {
 }));
 
 // Détail des accusés de réception d'un meme (#2).
-router.get('/memes/:memeId/receipts', loadChannel, asyncHandler((req, res) => {
+router.get('/memes/:memeId/receipts', asyncHandler((req, res) => {
   const m = db.prepare('SELECT id FROM memes WHERE id = ? AND channel_id = ?').get(req.params.memeId, req.channel.id);
   if (!m) return res.status(404).json({ error: 'Not found' });
   const receipts = db.prepare('SELECT device_id, name, status, detail, created_at FROM meme_receipts WHERE meme_id = ? ORDER BY created_at').all(m.id);
@@ -93,7 +95,7 @@ router.get('/memes/:memeId/receipts', loadChannel, asyncHandler((req, res) => {
 }));
 
 // Classement / statistiques par membre (#14).
-router.get('/leaderboard', loadChannel, asyncHandler((req, res) => {
+router.get('/leaderboard', asyncHandler((req, res) => {
   const { days } = z.object({ days: z.coerce.number().min(0).max(365).default(30) }).parse(req.query);
   const since = days > 0 ? Date.now() - days * 86400000 : 0;
   const cid = req.channel.id;
@@ -116,24 +118,24 @@ router.get('/leaderboard', loadChannel, asyncHandler((req, res) => {
 }));
 
 // Validation / rejet d'un meme en attente de revue manuelle (moderationMode = 'review').
-router.post('/memes/:memeId/approve', loadChannel, asyncHandler(async (req, res) => {
+router.post('/memes/:memeId/approve', asyncHandler(async (req, res) => {
   const r = await approveMeme(req.channel, req.params.memeId, req.user.username);
   res.json(r);
 }));
 
-router.post('/memes/:memeId/reject', loadChannel, asyncHandler((req, res) => {
+router.post('/memes/:memeId/reject', asyncHandler((req, res) => {
   const r = rejectMeme(req.channel, req.params.memeId, req.user.username);
   res.json(r);
 }));
 
 // Renvoie un meme déjà envoyé sans re-upload (réutilise le média déjà transcodé).
-router.post('/memes/:memeId/resend', loadChannel, asyncHandler(async (req, res) => {
+router.post('/memes/:memeId/resend', asyncHandler(async (req, res) => {
   const r = await resendMeme(req.channel, req.params.memeId, `panel:${req.user.username}`, req.user.username);
   res.status(201).json(r);
 }));
 
 // Retrait d'un meme (modération) : supprime le fichier média.
-router.delete('/memes/:memeId', loadChannel, asyncHandler((req, res) => {
+router.delete('/memes/:memeId', asyncHandler((req, res) => {
   const m = db.prepare('SELECT * FROM memes WHERE id = ? AND channel_id = ?').get(req.params.memeId, req.channel.id);
   if (!m) return res.status(404).json({ error: 'Not found' });
   removeMediaFile(m.media_path);
@@ -147,7 +149,7 @@ router.delete('/memes/:memeId', loadChannel, asyncHandler((req, res) => {
 
 // --- Hall of Memes : memes les plus marquants (les plus réagis) ----------
 // Filtrable par période (days) et par type de réaction (emoji).
-router.get('/hall', loadChannel, asyncHandler((req, res) => {
+router.get('/hall', asyncHandler((req, res) => {
   const { days, emoji, limit } = z.object({
     days: z.coerce.number().min(0).max(3650).default(30),
     emoji: z.string().max(8).optional().default(''),
@@ -189,7 +191,7 @@ router.get('/hall', loadChannel, asyncHandler((req, res) => {
 }));
 
 // --- Profil de membre (#10) : galerie, stats, réactions reçues, appareils, blocages.
-router.get('/members/:memberId/profile', loadChannel, asyncHandler((req, res) => {
+router.get('/members/:memberId/profile', asyncHandler((req, res) => {
   const cid = req.channel.id;
   const memberId = String(req.params.memberId);
   // Un membre est identifié par son discord_id ; on retrouve aussi ses envois via
@@ -245,7 +247,7 @@ router.get('/members/:memberId/profile', loadChannel, asyncHandler((req, res) =>
 // --- Soundboard partagé du channel (#4) : curé par les modérateurs -------
 // Stocké dans assets avec owner = 'channel'. data = { category, sharedBy }.
 const SHARED_OWNER = 'channel';
-router.get('/soundboard', loadChannel, asyncHandler((req, res) => {
+router.get('/soundboard', asyncHandler((req, res) => {
   const rows = db.prepare("SELECT * FROM assets WHERE channel_id = ? AND owner = ? AND kind = 'sound' ORDER BY created_at DESC")
     .all(req.channel.id, SHARED_OWNER);
   const parse = (v) => { try { return JSON.parse(v || '{}'); } catch { return {}; } };
@@ -256,7 +258,7 @@ router.get('/soundboard', loadChannel, asyncHandler((req, res) => {
   })));
 }));
 
-router.post('/soundboard', loadChannel, upload.single('media'), asyncHandler(async (req, res) => {
+router.post('/soundboard', upload.single('media'), asyncHandler(async (req, res) => {
   const s = getChannelSettings(req.channel);
   if (!req.file?.buffer) return res.status(400).json({ error: 'Fichier audio requis.' });
   const media = await processMedia(req.file.buffer, { ...s, allowedTypes: ['audio'] });
@@ -270,7 +272,7 @@ router.post('/soundboard', loadChannel, upload.single('media'), asyncHandler(asy
   res.status(201).json({ id });
 }));
 
-router.patch('/soundboard/:id', loadChannel, asyncHandler((req, res) => {
+router.patch('/soundboard/:id', asyncHandler((req, res) => {
   const row = db.prepare("SELECT * FROM assets WHERE id = ? AND channel_id = ? AND owner = ? AND kind = 'sound'")
     .get(req.params.id, req.channel.id, SHARED_OWNER);
   if (!row) return res.status(404).json({ error: 'Not found' });
@@ -282,7 +284,7 @@ router.patch('/soundboard/:id', loadChannel, asyncHandler((req, res) => {
   res.json({ ok: true });
 }));
 
-router.delete('/soundboard/:id', loadChannel, asyncHandler((req, res) => {
+router.delete('/soundboard/:id', asyncHandler((req, res) => {
   const row = db.prepare("SELECT * FROM assets WHERE id = ? AND channel_id = ? AND owner = ? AND kind = 'sound'")
     .get(req.params.id, req.channel.id, SHARED_OWNER);
   if (row) { removeMediaFile(row.media_path); db.prepare('DELETE FROM assets WHERE id = ?').run(row.id); audit(req.user.username, 'soundboard.remove', { channel: req.channel.slug, id: row.id }); }
@@ -290,7 +292,7 @@ router.delete('/soundboard/:id', loadChannel, asyncHandler((req, res) => {
 }));
 
 // Supprime TOUT l'historique du channel (médias inclus).
-router.post('/purge', loadChannel, asyncHandler((req, res) => {
+router.post('/purge', asyncHandler((req, res) => {
   const n = deleteAllMemes(req.channel.id);
   audit(req.user.username, 'memes.purge.channel', { channel: req.channel.slug, deleted: n });
   res.json({ deleted: n });

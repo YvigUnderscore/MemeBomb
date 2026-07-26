@@ -15,13 +15,15 @@ import Hall from './pages/Hall.jsx';
 import Components from './pages/Components.jsx';
 import NotFound from './pages/NotFound.jsx';
 
-function Protected({ children, staff = false, admin = false }) {
-  const { user, loading } = useAuth();
+function Protected({ children, staff = false, admin = false, channels = false }) {
+  const { user, loading, isStaff, canManageChannels } = useAuth();
   const location = useLocation();
   if (loading) return <div className="min-h-screen grid place-items-center"><Spinner className="w-8 h-8 text-accent" /></div>;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
-  // Les comptes 'member' (connexion Discord) n'ont accès qu'à leur profil et au Hall.
-  if ((staff || admin) && user.role === 'member') return <Navigate to="/profile" replace />;
+  // Les écrans de channel s'ouvrent aussi aux modérateurs de channel (comptes
+  // 'member' promus dans une whitelist) ; les écrans globaux restent au staff.
+  if (channels && !canManageChannels) return <Navigate to="/profile" replace />;
+  if (staff && !isStaff) return <Navigate to={canManageChannels ? '/channels' : '/profile'} replace />;
   if (admin && user.role !== 'admin') return <Navigate to="/" replace />;
   return <Layout>{children}</Layout>;
 }
@@ -31,8 +33,8 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected staff><Dashboard /></Protected>} />
-      <Route path="/channels" element={<Protected staff><Channels /></Protected>} />
-      <Route path="/channels/:id" element={<Protected staff><ChannelDetail /></Protected>} />
+      <Route path="/channels" element={<Protected channels><Channels /></Protected>} />
+      <Route path="/channels/:id" element={<Protected channels><ChannelDetail /></Protected>} />
       <Route path="/hall" element={<Protected><Hall /></Protected>} />
       <Route path="/_components" element={<Protected staff><Components /></Protected>} />
       <Route path="/moderation" element={<Protected staff><Moderation /></Protected>} />

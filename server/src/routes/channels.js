@@ -1,14 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, now, audit, getChannelSettings, DEFAULT_CHANNEL_SETTINGS } from '../db.js';
-import { panelAuth, requireAdmin, requireStaff, issueEditorToken } from '../auth.js';
+import {
+  panelAuth, requireAdmin, requireAnyChannelStaff, requireChannelStaff,
+  isGlobalStaff, moderatedChannelIds, issueEditorToken,
+} from '../auth.js';
 import { encrypt } from '../crypto.js';
 import { asyncHandler, loadChannel, slugify } from './helpers.js';
 import { onlineCount } from '../wsHub.js';
 import { restartChannelBot, stopChannelBot } from '../discordManager.js';
 
 const router = Router();
-router.use(panelAuth, requireStaff);
+router.use(panelAuth, requireAnyChannelStaff);
 
 function publicChannel(c) {
   return {
@@ -27,17 +30,23 @@ function publicChannel(c) {
 
 router.get('/', (req, res) => {
   const rows = db.prepare('SELECT * FROM channels ORDER BY id').all();
-  res.json(rows.map(publicChannel));
+  // Un modérateur de channel ne voit que les channels qu'il modère.
+  let visible = rows;
+  if (!isGlobalStaff(req.user)) {
+    const mine = new Set(moderatedChannelIds(req.user));
+    visible = rows.filter((c) => mine.has(c.id));
+  }
+  res.json(visible.map(publicChannel));
 });
 
 router.get('/defaults', (req, res) => res.json(DEFAULT_CHANNEL_SETTINGS));
 
-router.get('/:id', loadChannel, (req, res) => res.json(publicChannel(req.channel)));
+router.get('/:id', loadChannel, requireChannelStaff, (req, res) => res.json(publicChannel(req.channel)));
 
 // Jeton éphémère pour l'éditeur web embarqué dans le panel (iframe /compose).
 // Le modérateur/admin, déjà authentifié par cookie, obtient un token borné à CE channel
 // que l'éditeur utilise ensuite comme un « appareil » sur /api/client/*.
-router.post('/:id/editor-token', loadChannel, asyncHandler((req, res) => {
+router.post('/:id/editor-token', loadChannel, requireChannelStaff, asyncHandler((req, res) => {
   const token = issueEditorToken({ channelId: req.channel.id, username: req.user.username });
   res.json({ token, channel: { slug: req.channel.slug, name: req.channel.name } });
 }));
@@ -70,10 +79,11 @@ router.patch('/:id', requireAdmin, loadChannel, asyncHandler((req, res) => {
   res.json(publicChannel(db.prepare('SELECT * FROM channels WHERE id = ?').get(c.id)));
 }));
 
-// Mise à jour des réglages (fusionnés). Réservé aux admins : ces réglages
-// incluent des contrôles de sécurité (mode de modération, mots bannis, quotas,
-// débits) qu'un simple modérateur ne doit pas pouvoir affaiblir.
-router.put('/:id/settings', requireAdmin, loadChannel, asyncHandler((req, res) => {
+// Mise à jour des réglages (fusionnés). Ouvert à qui gère le channel : admin,
+// modérateur panel, ou modérateur de CE channel. Ces réglages portent des
+// contrôles de sécurité (mode de modération, mots bannis, quotas, débits) —
+// promouvoir quelqu'un modérateur, c'est donc lui confier ces leviers.
+router.put('/:id/settings', loadChannel, requireChannelStaff, asyncHandler((req, res) => {
   const schema = z.object({
     maxUploadMb: z.number().min(1).max(200),
     maxVideoDurationS: z.number().min(1).max(120),
@@ -107,8 +117,9 @@ router.put('/:id/settings', requireAdmin, loadChannel, asyncHandler((req, res) =
   res.json(merged);
 }));
 
-// Configuration du bot Discord du channel (token chiffré).
-router.put('/:id/discord', requireAdmin, loadChannel, asyncHandler(async (req, res) => {
+// Configuration du bot Discord du channel (token chiffré). Le token n'est
+// jamais renvoyé : un modérateur peut le remplacer, pas le lire.
+router.put('/:id/discord', loadChannel, requireChannelStaff, asyncHandler(async (req, res) => {
   const { token, guildId, enabled } = z.object({
     token: z.string().max(120).optional(),
     guildId: z.string().max(40).optional(),

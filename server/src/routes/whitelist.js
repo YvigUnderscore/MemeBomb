@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, now, audit } from '../db.js';
-import { panelAuth, requireStaff } from '../auth.js';
+import { panelAuth, requireChannelStaff } from '../auth.js';
 import { asyncHandler, loadChannel } from './helpers.js';
 
 // Monté sur /api/channels/:channelId/whitelist
 const router = Router({ mergeParams: true });
-router.use(panelAuth, requireStaff, loadChannel);
+router.use(panelAuth, loadChannel, requireChannelStaff);
 
 router.get('/', (req, res) => {
   res.json(db.prepare('SELECT * FROM whitelist WHERE channel_id = ? ORDER BY role DESC, discord_username')

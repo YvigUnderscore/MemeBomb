@@ -19,16 +19,18 @@ import StatsTab from './channel/StatsTab.jsx';
 import SoundboardTab from './channel/SoundboardTab.jsx';
 import DiscordTab from './channel/DiscordTab.jsx';
 
+// `staff: true` = réservé au staff global (admin / modérateur panel). Les
+// autres onglets forment le panel du modérateur de channel.
 const TABS = [
-  { id: 'send', label: 'Editor', icon: Wand2 },
+  { id: 'send', label: 'Editor', icon: Wand2, staff: true },
   { id: 'settings', label: 'Settings', icon: SlidersHorizontal },
   { id: 'whitelist', label: 'Whitelist', icon: Users },
   { id: 'groups', label: 'Groups', icon: Boxes },
   { id: 'devices', label: 'Devices', icon: MonitorSmartphone },
   { id: 'soundboard', label: 'Soundboard', icon: Music },
   { id: 'history', label: 'History', icon: History },
-  { id: 'stats', label: 'Stats', icon: BarChart3 },
-  { id: 'discord', label: 'Discord', icon: Bot, admin: true },
+  { id: 'stats', label: 'Stats', icon: BarChart3, staff: true },
+  { id: 'discord', label: 'Discord', icon: Bot },
 ];
 
 export default function ChannelDetail() {
@@ -36,9 +38,9 @@ export default function ChannelDetail() {
   const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
-  const { isAdmin } = useAuth();
+  const { isAdmin, isStaff } = useAuth();
   const [channel, setChannel] = useState(null);
-  const [tab, setTab] = useState('send');
+  const [tab, setTab] = useState(isStaff ? 'send' : 'whitelist');
 
   const reload = () => ChannelAPI.get(id).then(setChannel).catch((e) => toast.error(e.message));
   useEffect(() => { reload(); }, [id]);
@@ -51,7 +53,7 @@ export default function ChannelDetail() {
     catch (e) { toast.error(e.message); }
   };
 
-  const tabs = TABS.filter((t) => !t.admin || isAdmin);
+  const tabs = TABS.filter((t) => !t.staff || isStaff);
 
   return (
     <div className="space-y-6">
@@ -82,15 +84,15 @@ export default function ChannelDetail() {
       </div>
 
       <div>
-        {tab === 'send' && <EditorTab channel={channel} />}
+        {tab === 'send' && isStaff && <EditorTab channel={channel} />}
         {tab === 'settings' && <SettingsTab channel={channel} onSaved={reload} />}
         {tab === 'whitelist' && <WhitelistTab channel={channel} />}
         {tab === 'groups' && <GroupsTab channel={channel} />}
         {tab === 'devices' && <DevicesTab channel={channel} />}
         {tab === 'soundboard' && <SoundboardTab channel={channel} />}
         {tab === 'history' && <HistoryTab channel={channel} />}
-        {tab === 'stats' && <StatsTab channel={channel} />}
-        {tab === 'discord' && isAdmin && <DiscordTab channel={channel} onSaved={reload} />}
+        {tab === 'stats' && isStaff && <StatsTab channel={channel} />}
+        {tab === 'discord' && <DiscordTab channel={channel} onSaved={reload} />}
       </div>
     </div>
   );

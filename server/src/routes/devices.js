@@ -2,13 +2,13 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { db, now, audit } from '../db.js';
-import { panelAuth, requireStaff } from '../auth.js';
+import { panelAuth, requireChannelStaff } from '../auth.js';
 import { invalidateBlocks } from '../wsHub.js';
 import { asyncHandler, loadChannel } from './helpers.js';
 
 // Monté sur /api/channels/:channelId/devices
 const router = Router({ mergeParams: true });
-router.use(panelAuth, requireStaff, loadChannel);
+router.use(panelAuth, loadChannel, requireChannelStaff);
 
 // Code d'appairage lisible (évite 0/O, 1/I).
 function makePairingCode() {
