@@ -1814,6 +1814,40 @@ function encodeProgressUI(btn, hint) {
 }
 function clearHint(hint) { if (hint) { hint.style.color = ''; hint.textContent = ''; } }
 
+// ---- Vider l'éditeur après l'envoi -------------------------------------
+// Préférence mémorisée par navigateur, comme le volume d'écoute. Décochée par
+// défaut : le comportement d'origine (la scène reste en place) ne change pas
+// pour qui n'en veut pas.
+const CLEAR_KEY = 'md_clear_after_send';
+const clearAfterBox = $('clearAfterSend');
+try { clearAfterBox.checked = localStorage.getItem(CLEAR_KEY) === '1'; } catch { /* ignore */ }
+clearAfterBox.onchange = () => {
+  try { localStorage.setItem(CLEAR_KEY, clearAfterBox.checked ? '1' : '0'); } catch { /* ignore */ }
+};
+
+// Remet la scène à zéro : calques, dessin, fond, sons attachés et lien vers la
+// bibliothèque. Les réglages d'affichage (durée, position, taille, volume) et
+// les destinataires sont CONSERVÉS — ce sont des habitudes d'envoi, pas le
+// contenu du meme. Le meme envoyé reste récupérable par « ↩️ Last », que
+// `saveLast()` a mémorisé juste avant l'envoi.
+function clearScene() {
+  for (const mf of mediaFiles.values()) { try { URL.revokeObjectURL(mf.url); } catch { /* ignore */ } }
+  mediaFiles.clear();
+  for (const s of sounds) { if (s._url) { try { URL.revokeObjectURL(s._url); } catch { /* ignore */ } } }
+  sndStop();
+  els = []; strokes = []; sounds = [];
+  base.media = null; base.img = null;
+  selId = null; $('elCard').classList.add('hidden');
+  currentAsset = null;             // le prochain « 💾 Save » crée une entrée neuve
+  setBgMode('none');
+  $('bgMediaName').textContent = '';
+  renderElements(); renderStrokes(); renderSounds(); renderMiniBox();
+  // Historique reparti de zéro : annuler ne doit pas ressusciter des calques
+  // dont les fichiers viennent d'être libérés.
+  history = [snapshot()]; hIndex = 0; updateUndoButtons();
+  updateWeight();
+}
+
 $('sendBtn').onclick = async () => {
   $('sendErr').textContent = '';
   if (!hasContent()) { $('sendErr').textContent = 'Add at least one element or a background.'; return; }
@@ -1827,6 +1861,9 @@ $('sendBtn').onclick = async () => {
     btn.textContent = r?.pending ? 'Pending moderation ⏳'
       : r?.queued ? `Queued — sending ${r.warmupRemainS ? `in ~${r.warmupRemainS}s` : 'after warmup'} ⏳`
         : 'Sent ✅';
+    // Le meme est accepté (en attente de modération ou en file compris) : la
+    // scène a fait son office.
+    if (clearAfterBox.checked) clearScene();
     setTimeout(() => { btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }, (r?.pending || r?.queued) ? 2600 : 1200);
   } catch (e) { clearHint($('sendErr')); $('sendErr').textContent = e.message; btn.textContent = 'Send the meme 🚀'; btn.disabled = false; }
 };

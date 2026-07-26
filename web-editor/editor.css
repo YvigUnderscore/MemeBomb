@@ -134,6 +134,7 @@ label.label { margin-top: 10px; display: block; }
 .chips button.active { background: rgba(245,52,42,.15); color: var(--accent); border-color: rgba(245,52,42,.4); }
 
 .send-bar { border-top: 1px solid var(--border); padding: 14px 16px; }
+.clear-after { margin-top: 10px; }
 .big { font-size: 15px; padding: 13px; margin-top: 8px; }
 .err { color: var(--danger); font-size: 13px; min-height: 16px; margin-bottom: 4px; }
 .small { font-size: 12px; }
