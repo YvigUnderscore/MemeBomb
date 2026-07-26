@@ -106,7 +106,7 @@ function MemeViewer({ meme, onClose, onReaction }) {
             )}
             {!meme.mediaUrl && (
               <div className="p-10 text-center">
-                {meme.text ? <div className="text-2xl font-extrabold text-white">{meme.text}</div>
+                {meme.text ? <div className="text-2xl font-extrabold text-white whitespace-pre-line">{meme.text}</div>
                   : <div className="text-sm text-muted">Media unavailable (purged before it was archived).</div>}
               </div>
             )}

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { ensureAdmin } from '../src/auth.js';
+import { db } from '../src/db.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -79,6 +80,13 @@ describe('cycle channel → whitelist → device → envoi', () => {
     const r = await request(app).post('/api/client/meme').set('X-Device-Token', deviceToken)
       .field('text', 'Hello depuis le test').expect(201);
     expect(r.body.id).toBeTruthy();
+  });
+
+  it('conserve les sauts de ligne d\'un texte multiligne', async () => {
+    const r = await request(app).post('/api/client/meme').set('X-Device-Token', deviceToken)
+      .field('text', 'Première ligne\nSeconde ligne').expect(201);
+    const stored = db.prepare('SELECT text FROM memes WHERE id = ?').get(r.body.id);
+    expect(stored.text).toBe('Première ligne\nSeconde ligne');
   });
 
   it('filtre l\'historique par recherche texte', async () => {

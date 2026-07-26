@@ -49,7 +49,7 @@ function Lightbox({ meme, onClose }) {
           {meme.type === 'image' && <img src={meme.mediaUrl} alt="" className="max-h-[75vh] w-auto object-contain" />}
           {(meme.type === 'video' || meme.type === 'gif') && <video src={meme.mediaUrl} controls autoPlay loop className="max-h-[75vh]" />}
           {meme.type === 'audio' && <div className="p-10 w-full"><audio src={meme.mediaUrl} controls autoPlay className="w-full" /></div>}
-          {(!meme.mediaUrl || meme.type === 'text') && <div className="p-16 text-2xl font-extrabold text-white text-center">{meme.text}</div>}
+          {(!meme.mediaUrl || meme.type === 'text') && <div className="p-16 text-2xl font-extrabold text-white text-center whitespace-pre-line">{meme.text}</div>}
         </div>
       </div>
     </div>

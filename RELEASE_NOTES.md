@@ -1,3 +1,23 @@
+# MemeDrop v1.4.0 — "Line breaks & channel moderators"
+
+## ✨ New
+
+### Multi-line text
+- **Meme text can now span several lines.** Line breaks are kept end to end — editor, server, overlay — instead of being silently stripped.
+- In the editor, the text field of a layer is a **text box**: press Enter for a new line. Editing a layer directly on the stage (double-click), **Shift+Enter** breaks the line and Enter still validates.
+- Text size now follows the **longest line** rather than the total length: adding a line no longer shrinks the whole block. A tall block is capped so it stays inside the frame.
+- From Discord, `/meme text:` accepts **`\n`** where you want a break (a slash command option cannot hold a real newline). Feed messages quote every line.
+
+### Channel moderators get a panel
+- Promoting a member to **Moderator** in a channel's whitelist now opens the panel for them: Whitelist, Settings, Groups, Devices, Soundboard, History and Discord — **for that channel only**. They see neither the other channels nor the global screens (dashboard, moderation, guidelines, accounts).
+- Creating or deleting a channel and managing panel accounts stay reserved to administrators.
+- Note: a moderator can now change their channel's settings, including moderation mode and banned words.
+
+## 🔧 Client (Windows)
+- The overlay renders line breaks in meme text.
+
+---
+
 # MemeDrop v1.3.0 — "Saved memes & multi-sound"
 
 ## ✨ New

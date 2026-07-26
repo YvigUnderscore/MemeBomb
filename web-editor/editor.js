@@ -235,7 +235,9 @@ function startInlineEdit(el, node) {
   const onBlur = () => finish(false);
   const onKey = (ev) => {
     ev.stopPropagation();
-    if (ev.key === 'Enter') { ev.preventDefault(); span.blur(); }
+    // Maj+Entrée : saut de ligne (comportement natif du contenteditable).
+    // Entrée seule : on valide, comme avant.
+    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); span.blur(); }
     else if (ev.key === 'Escape') { ev.preventDefault(); span.textContent = el.text; finish(true); }
   };
   span.addEventListener('blur', onBlur);
@@ -1217,6 +1219,23 @@ function sourceReady(src) {
   return (src.naturalWidth || src.width || 0) > 0;
 }
 
+// Texte d'un calque, ligne par ligne, bloc centré sur (cx, cy).
+// L'interligne vaut 1 em — exactement le `line-height: 1` de l'aperçu DOM, sans
+// quoi aperçu et rendu final cesseraient de se superposer.
+// Les contours sont tracés AVANT tous les remplissages : ligne par ligne, le
+// contour d'une ligne mordrait sur le remplissage de la précédente.
+const textLinesOf = (el) => String(el.text || '').split('\n');
+function drawTextLines(ctx, el, fpx, cx, cy) {
+  const lines = textLinesOf(el);
+  const top = cy - ((lines.length - 1) * fpx) / 2;
+  if (el.outline) {
+    ctx.strokeStyle = '#000'; ctx.lineWidth = fpx * 0.12;
+    lines.forEach((line, i) => ctx.strokeText(line, cx, top + i * fpx));
+  }
+  ctx.fillStyle = el.color;
+  lines.forEach((line, i) => ctx.fillText(line, cx, top + i * fpx));
+}
+
 // GÉOMÉTRIE COMMUNE au rendu figé (bake) et à l'encodage vidéo navigateur :
 // position, rotation, opacité et corner-pin sont calculés ICI et nulle part
 // ailleurs — deux implémentations finiraient inévitablement par diverger.
@@ -1233,8 +1252,7 @@ function drawSceneLayers(ctx, EW, EH, keep) {
       const fpx = el.fontFrac * EW;
       ctx.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
-      if (el.outline) { ctx.strokeStyle = '#000'; ctx.lineWidth = fpx * 0.12; ctx.strokeText(el.text || '', 0, 0); }
-      ctx.fillStyle = el.color; ctx.fillText(el.text || '', 0, 0);
+      drawTextLines(ctx, el, fpx, 0, 0);
     } else {
       const w = el.wPct * EW, h = w / el.ratio; ctx.drawImage(src, -w / 2, -h / 2, w, h);
     }
@@ -1284,13 +1302,16 @@ function drawElementWarped(ctx, el, EW, source) {
     const fpx = el.fontFrac * EW;
     const meas = src.getContext('2d');
     meas.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
-    src.width = Math.max(4, Math.ceil(meas.measureText(el.text || ' ').width + fpx * 0.3));
-    src.height = Math.max(4, Math.ceil(fpx * 1.3));
+    // La ligne la plus large fixe la largeur ; la hauteur suit le nombre de
+    // lignes (interligne 1 em + la marge d'une ligne seule).
+    const lines = textLinesOf(el);
+    const widest = lines.reduce((m, l) => Math.max(m, meas.measureText(l || ' ').width), 0);
+    src.width = Math.max(4, Math.ceil(widest + fpx * 0.3));
+    src.height = Math.max(4, Math.ceil((lines.length - 1) * fpx + fpx * 1.3));
     const s = src.getContext('2d');
     s.font = `800 ${fpx}px Impact, "Arial Black", sans-serif`;
     s.textAlign = 'center'; s.textBaseline = 'middle'; s.lineJoin = 'round';
-    if (el.outline) { s.strokeStyle = '#000'; s.lineWidth = fpx * 0.12; s.strokeText(el.text || '', src.width / 2, src.height / 2); }
-    s.fillStyle = el.color; s.fillText(el.text || '', src.width / 2, src.height / 2);
+    drawTextLines(s, el, fpx, src.width / 2, src.height / 2);
   } else if (source) {
     // Images ET vidéos : la frame courante est d'abord rendue à la taille du
     // calque, puis déformée — même maillage pour les deux, donc même rendu.

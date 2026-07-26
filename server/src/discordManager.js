@@ -61,7 +61,7 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName('meme')
       .setDescription('Send a meme to your friends\' screens')
-      .addStringOption((o) => o.setName('text').setDescription('Meme text').setMaxLength(280))
+      .addStringOption((o) => o.setName('text').setDescription('Meme text (\\n for a new line)').setMaxLength(280))
       .addAttachmentOption((o) => o.setName('media').setDescription('Image / GIF / video / sound'))
       .addStringOption((o) => o.setName('group').setDescription('Preset recipient group').setAutocomplete(true))
       .addUserOption((o) => o.setName('target').setDescription('Target a specific person'))
@@ -123,7 +123,9 @@ async function registerCommands(token, appId, guildId) {
 async function handleMeme(interaction, channel) {
   const settings = JSON.parse(channel.settings || '{}');
   const maxBytes = ((settings.maxUploadMb) || 25) * 1024 * 1024;
-  const text = interaction.options.getString('text') || '';
+  // Une option de commande slash tient sur une seule ligne (Entrée envoie la
+  // commande) : la séquence \n y tient lieu de saut de ligne.
+  const text = (interaction.options.getString('text') || '').replace(/\\n/g, '\n');
   const attachment = interaction.options.getAttachment('media');
   const groupName = interaction.options.getString('group') || '';
   const targetUser = interaction.options.getUser('target');
@@ -243,8 +245,10 @@ export async function postMemeFeed(channelRow, info) {
       files.push({ attachment: info.mediaAbsPath, name: path.basename(info.mediaAbsPath) });
     }
   } catch { /* ignore */ }
+  // Chaque ligne reprend le « > » : sans ça, seule la première serait citée.
+  const quoted = String(info.text || '').slice(0, 500).replace(/\n/g, '\n> ');
   const content = (`🎬 **${info.senderName || 'Someone'}** dropped a meme`
-    + (info.text ? `\n> ${String(info.text).slice(0, 500)}` : '')).slice(0, 1900);
+    + (info.text ? `\n> ${quoted}` : '')).slice(0, 1900);
 
   for (const cid of feedIds) {
     try {

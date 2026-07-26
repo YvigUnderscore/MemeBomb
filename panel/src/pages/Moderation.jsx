@@ -70,7 +70,7 @@ export default function Moderation() {
             {pending.map((m) => (
               <div key={m.id} className="bg-surface-2 border border-border rounded-xl p-3">
                 <PendingMedia m={m} />
-                {m.text && <div className="text-sm mt-2 break-words">{m.text}</div>}
+                {m.text && <div className="text-sm mt-2 break-words whitespace-pre-line">{m.text}</div>}
                 <div className="text-xs text-muted flex items-center gap-2 mt-1">
                   <span>/{m.channel_slug}</span> · <span>{m.sender_name || m.sender}</span> · <span>{new Date(m.created_at).toLocaleString('fr-FR')}</span>
                 </div>

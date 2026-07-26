@@ -218,9 +218,18 @@
     el.className = 'meme-text ' + (inCard ? 'in-card' : 'pos-' + (['top', 'center', 'bottom'].includes(opt.textPos) ? opt.textPos : 'bottom'));
     el.textContent = text;
     el.style.color = /^#[0-9a-fA-F]{6}$/.test(opt.textColor || '') ? opt.textColor : '#ffffff';
-    const len = (text || '').length;
+    // Largeur : c'est la ligne la PLUS LONGUE qui dicte la taille. Se fonder sur
+    // la longueur totale rapetisserait tout le bloc à chaque ligne ajoutée
+    // (pour un texte d'une seule ligne, les deux reviennent au même).
+    const lines = String(text || '').split('\n');
+    const len = lines.reduce((m, l) => Math.max(m, l.length), 0);
     const frac = len < 20 ? 0.11 : len < 60 ? 0.075 : len < 120 ? 0.055 : 0.045;
-    const px = Math.max(10, frac * stageW);
+    let px = Math.max(10, frac * stageW);
+    // Hauteur : n lignes ne doivent pas déborder du cadre 16/9.
+    if (lines.length > 1) {
+      const stageH = stageW * 9 / 16;
+      px = Math.max(10, Math.min(px, (stageH * (inCard ? 0.8 : 0.7)) / (lines.length * 1.15)));
+    }
     el.style.fontSize = `${px}px`;
     el.style.setProperty('--stroke', `${Math.max(1, px * 0.06)}px`);
     return el;
