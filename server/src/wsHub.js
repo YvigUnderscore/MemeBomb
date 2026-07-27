@@ -66,6 +66,58 @@ export function onlineSince(channelId, ownerKey) {
   return onlineSinceMap.get(channelId)?.get(String(ownerKey)) ?? null;
 }
 
+// --- Présence : qui est là, et joignable ? ---------------------------------
+// Le serveur ne connaît de lui-même que les sockets ouverts. « Ne pas déranger »
+// et « overlay coupé » ne vivent que dans le client, qui les publie par un
+// message `status` (à l'ouverture puis à chaque changement). Un client d'avant
+// cette fonctionnalité n'en envoie jamais : il compte simplement comme joignable.
+function applyStatus(ws, msg) {
+  const until = Number(msg.dndUntil);
+  ws.status = {
+    dnd: !!msg.dnd,
+    dndUntil: Number.isFinite(until) && until > 0 ? until : 0,
+    overlay: msg.overlay !== false,
+  };
+}
+
+// Une échéance dépassée ne compte plus : le client peut être resté silencieux
+// depuis (veille, socket inactif), on n'attend pas sa prochaine publication.
+function dndActive(st) {
+  if (!st?.dnd) return false;
+  return !st.dndUntil || now() < st.dndUntil;
+}
+
+/**
+ * État de présence d'un channel, agrégé par propriétaire — un membre peut avoir
+ * plusieurs appareils connectés. Il n'est injoignable que si TOUS le sont : un
+ * seul écran disponible suffit à ce qu'il voie passer le meme.
+ * @returns {Array<{ownerKey, discordId, status, dndUntil, devices, since}>}
+ */
+export function channelPresence(channelId) {
+  const byOwner = new Map();
+  for (const ws of byChannel.get(channelId) || []) {
+    if (ws.readyState !== ws.OPEN) continue;
+    const key = ownerKeyOf(ws);
+    if (!byOwner.has(key)) byOwner.set(key, []);
+    byOwner.get(key).push(ws);
+  }
+  return [...byOwner].map(([ownerKey, conns]) => {
+    const dnd = conns.every((ws) => dndActive(ws.status));
+    // Le DND du membre cesse à la première échéance de ses appareils ; une
+    // échéance nulle (« jusqu'à réactivation ») n'en fixe aucune.
+    const untils = conns.map((ws) => ws.status?.dndUntil || 0).filter((u) => u > 0);
+    const overlayOff = conns.every((ws) => ws.status && ws.status.overlay === false);
+    return {
+      ownerKey,
+      discordId: conns[0].discordId || '',
+      status: dnd ? 'dnd' : overlayOff ? 'off' : 'online',
+      dndUntil: dnd && untils.length ? Math.min(...untils) : 0,
+      devices: conns.length,
+      since: onlineSince(channelId, ownerKey) || 0,
+    };
+  });
+}
+
 function addConn(ws) {
   const set = byChannel.get(ws.channelId) || new Set();
   set.add(ws);
@@ -320,6 +372,7 @@ export function initWebSocket(server) {
         handleReaction(ws, String(msg.memeId), String(msg.emoji));
         return;
       }
+      if (msg.type === 'status') { applyStatus(ws, msg); return; }
     });
     ws.on('close', () => removeConn(ws));
     ws.on('error', () => removeConn(ws));

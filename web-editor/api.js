@@ -117,6 +117,8 @@
         return { channel: c.channel, settings: c.settings, features: c.features, limits: c.limits, groups: t.groups, members: t.members };
       } catch (e) { return { error: e.message }; }
     },
+    // Présence des membres (en ligne / ne pas déranger) — interrogée en boucle.
+    getPresence: () => api('GET', '/api/client/presence'),
     getStorage: () => api('GET', '/api/client/storage'),
     getGuidelines: async () => { const c = await getConfig(); return { text: c.guidelines, requireAccept: c.settings.requireGuidelinesAccept, acceptedAt: localStorage.getItem('md_gl_accepted') }; },
     acceptGuidelines: async () => { localStorage.setItem('md_gl_accepted', String(Date.now())); return true; },

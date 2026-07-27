@@ -21,7 +21,7 @@ import { composeLayers } from '../composer.js';
 import { createAndDispatchMeme, signMediaUrl, MAX_SOUNDS } from '../memeService.js';
 import { createSchedule } from '../scheduler.js';
 import { removeMediaFile, soundPathsOf } from '../retention.js';
-import { pushPanel, invalidateBlocks } from '../wsHub.js';
+import { pushPanel, invalidateBlocks, channelPresence } from '../wsHub.js';
 import { searchMyInstants, downloadMyInstants } from '../sounds.js';
 import { giphyEnabled, searchGiphy, fetchRemoteMedia } from '../webmedia.js';
 import { asyncHandler } from './helpers.js';
@@ -131,6 +131,31 @@ router.get('/targets', deviceAuth, (req, res) => {
     .map((m) => ({ discordId: m.discord_id, username: m.discord_username || m.discord_id }));
   res.json({ groups, members });
 });
+
+// Présence des destinataires : qui est connecté, qui est en « ne pas déranger ».
+// L'éditeur est une page web sans WebSocket : il interroge cette route
+// périodiquement plutôt que d'ouvrir un socket rien que pour ça.
+router.get('/presence', deviceAuth, asyncHandler((req, res) => {
+  const channel = channelOf(req);
+  const flags = effectiveFeatures(channel, ownerOf(req.device));
+  if (flags.presence === false) return res.json({ enabled: false, members: [], others: 0 });
+
+  const live = new Map(channelPresence(channel.id).map((p) => [p.ownerKey, p]));
+  const members = db.prepare('SELECT discord_id, discord_username FROM whitelist WHERE channel_id = ? AND banned = 0 ORDER BY discord_username')
+    .all(channel.id)
+    .map((m) => {
+      const p = live.get(String(m.discord_id));
+      live.delete(String(m.discord_id));
+      return {
+        discordId: m.discord_id, username: m.discord_username || m.discord_id,
+        status: p ? p.status : 'offline',
+        dndUntil: p?.dndUntil || 0, devices: p?.devices || 0, since: p?.since || 0,
+      };
+    });
+  // Appareils connectés sans membre whitelisté (appareil anonyme) : non ciblables
+  // mais bien destinataires d'une diffusion à tout le channel — comptés à part.
+  res.json({ enabled: true, members, others: live.size });
+}));
 
 // --- Envoi (media + overlay + son) --------------------------------------
 router.post('/meme', deviceAuth, memeFields, asyncHandler(async (req, res) => {

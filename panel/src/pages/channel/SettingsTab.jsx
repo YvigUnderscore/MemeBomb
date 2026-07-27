@@ -10,6 +10,7 @@ export const FEATURE_LABELS = {
   schedule: 'Scheduling', multiElement: 'Multi-layer editor (image/drawing)',
   chooseBig: 'Allow large sizes', choosePosition: 'Pick the on-screen position',
   shareSettings: 'Share settings between members',
+  presence: 'See who is online (editor)',
 };
 
 const MEDIA_TYPES = [

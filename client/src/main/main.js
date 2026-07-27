@@ -256,9 +256,23 @@ function registerShortcuts() {
   safe(s.replayLast, () => replayLast());
 }
 
+// Publie la disponibilité du poste (« ne pas déranger », overlay coupé) : c'est
+// la seule source d'où le serveur la tient, et l'éditeur s'en sert pour montrer
+// qui est joignable. Branché sur updateTray() — tout changement de DND ou
+// d'overlay rafraîchit le tray — et sans effet si l'état n'a pas bougé.
+function publishAvailability() {
+  const c = store.get();
+  connection.publishStatus({
+    dnd: !!c.fun.doNotDisturb,
+    dndUntil: c.fun.dndUntil || 0,
+    overlay: c.overlay.enabled !== false,
+  });
+}
+
 // ---- Tray ---------------------------------------------------------------
 function updateTray() {
   if (!tray) return;
+  publishAvailability();
   const cfg = store.get();
   const status = connection.status;
   const statusLabel = {

@@ -321,6 +321,7 @@ export const DEFAULT_CHANNEL_SETTINGS = {
   features: {
     video: true, audio: true, sounds: true, schedule: true,
     multiElement: true, chooseBig: true, choosePosition: true, shareSettings: true,
+    presence: true,
   },
   // Stockage & abus
   storageQuotaMb: 50,                  // quota bibliothèque par utilisateur
@@ -332,7 +333,7 @@ export const DEFAULT_CHANNEL_SETTINGS = {
   sharedSoundboard: true,
 };
 
-export const FEATURE_KEYS = ['video', 'audio', 'sounds', 'schedule', 'multiElement', 'chooseBig', 'choosePosition', 'shareSettings'];
+export const FEATURE_KEYS = ['video', 'audio', 'sounds', 'schedule', 'multiElement', 'chooseBig', 'choosePosition', 'shareSettings', 'presence'];
 
 export function getChannelSettings(channel) {
   let stored = {};

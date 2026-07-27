@@ -104,6 +104,9 @@ class Connection extends EventEmitter {
     this.sockets = new Map();       // slug -> { ws, pingTimer, reconnectTimer, open }
     this.status = 'disconnected';
     this.config = null;
+    // Dernier état de disponibilité publié ({ dnd, dndUntil, overlay }) : renvoyé
+    // à chaque (re)connexion, sinon le serveur croirait le poste joignable.
+    this.deviceStatus = null;
   }
 
   active() { return this.store.activeAccount(); }
@@ -180,6 +183,7 @@ class Connection extends EventEmitter {
       entry.open = true;
       clearTimeout(entry.connectTimer);
       bump();
+      if (this.deviceStatus) { try { entry.ws.send(JSON.stringify({ type: 'status', ...this.deviceStatus })); } catch {} }
       // Battement de cœur applicatif : ping régulier + détection de socket
       // « mort silencieux » (demi-ouvert : aucun close TCP, ex. wifi qui change
       // ou reprise de veille). Sans aucune activité depuis 70 s malgré les pings,
@@ -231,6 +235,20 @@ class Connection extends EventEmitter {
   }
   sendAck(slug, memeId, status, detail = '') { return this._sendWs(slug, { type: 'ack', memeId, status, detail }); }
   sendReaction(slug, memeId, emoji) { return this._sendWs(slug, { type: 'reaction', memeId, emoji }); }
+
+  // Disponibilité (« ne pas déranger », overlay coupé) : publiée sur TOUS les
+  // channels appairés — la présence est calculée par channel, côté serveur.
+  // Appelée à chaque rafraîchissement du tray : on ne réémet que sur changement
+  // réel (la reconnexion, elle, repart de `deviceStatus`).
+  publishStatus(status) {
+    const payload = JSON.stringify({ type: 'status', ...status });
+    if (payload === this._statusPayload) return;
+    this._statusPayload = payload;
+    this.deviceStatus = status;
+    for (const e of this.sockets.values()) {
+      if (e.open && e.ws) { try { e.ws.send(payload); } catch { /* la reconnexion renverra l'état */ } }
+    }
+  }
 
   // Blocages personnels (#15).
   listBlocks() { return this._authed('GET', '/api/client/blocks'); }

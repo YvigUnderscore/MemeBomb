@@ -1,3 +1,21 @@
+# MemeDrop v1.5.0 — "Who's around?"
+
+## ✨ New
+
+### See who is online before you fire
+- The editor's **Recipients** panel now shows, live, who can actually receive a meme: a summary line (`🟢 3 online · 🌙 1 do not disturb · ⚪ 4 offline`) and a colored dot on every member chip.
+- Four states: **online**, **do not disturb** (with the time it ends, when set), **notifications off** (overlay disabled) and **offline**. Hover a chip for the detail.
+- Pick someone who can't see it and a warning appears under the chips — a meme is only delivered to devices connected at that moment, it is never replayed later.
+- Devices paired to no Discord member are counted apart (`+2 unlinked devices`): they receive channel-wide broadcasts but can't be targeted.
+- Refreshed every 20 s, paused while the tab sits in the background.
+- Moderators can switch it off per channel, group or member: **See who is online (editor)** in the channel's feature flags.
+
+## 🔧 Client (Windows)
+- The client now publishes its availability — **do not disturb** (and its expiry) and **overlay enabled/disabled** — to the server, which is what feeds the editor's presence. Nothing else is sent, and the state is republished on every reconnection.
+- Clients that are not updated simply count as "online": the server never guesses a state it wasn't told.
+
+---
+
 # MemeDrop v1.4.0 — "Line breaks & channel moderators"
 
 ## ✨ New

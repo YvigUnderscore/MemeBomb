@@ -133,6 +133,16 @@ label.label { margin-top: 10px; display: block; }
 .chips button { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
 .chips button.active { background: rgba(245,52,42,.15); color: var(--accent); border-color: rgba(245,52,42,.4); }
 
+/* Présence des destinataires : pastille d'état sur chaque puce membre. */
+.chips button .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px;
+  vertical-align: middle; background: var(--muted); opacity: .4; }
+.chips button.st-online .dot { background: var(--success); opacity: 1; }
+.chips button.st-dnd .dot { background: var(--warning); opacity: 1; }
+.chips button.st-off .dot { background: var(--muted); opacity: 1; }
+.chips button.st-offline { opacity: .55; }
+.presence-line { font-size: 12px; color: var(--muted); margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 10px; }
+.presence-warn { font-size: 12px; color: var(--warning); line-height: 1.4; }
+
 .send-bar { border-top: 1px solid var(--border); padding: 14px 16px; }
 .clear-after { margin-top: 10px; }
 .big { font-size: 15px; padding: 13px; margin-top: 8px; }

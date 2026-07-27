@@ -45,6 +45,7 @@ const selMembers = new Set();
 
   await loadChannels();
   await loadTargets();
+  startPresenceLoop();
   refreshStorage();
   pushHistory();
 
@@ -79,6 +80,7 @@ async function loadTargets() {
     $('optAnimOut').max = window._maxAnimMs;
     $('optDur').max = Math.max(30, window._maxVideoS);
     $('sendErr').textContent = '';
+    refreshPresence();
   } else {
     $('sendErr').textContent = info?.error ? `Connection: ${info.error}` : 'Not paired — open the Settings.';
   }
@@ -1142,10 +1144,105 @@ function buildTargets(groups, members) {
   const gc = $('groupChips'); gc.replaceChildren();
   groups.forEach((g) => { const b = document.createElement('button'); b.textContent = `${g.name} (${g.count})`; b.onclick = () => { toggle(selGroups, g.name, b); updateTargetBadge(); }; gc.appendChild(b); });
   const mc = $('memberChips'); mc.replaceChildren();
-  members.forEach((m) => { const b = document.createElement('button'); b.textContent = m.username; b.onclick = () => { toggle(selMembers, m.discordId, b); updateTargetBadge(); }; mc.appendChild(b); });
+  memberBtns.clear();
+  members.forEach((m) => {
+    const b = document.createElement('button');
+    const dot = document.createElement('span'); dot.className = 'dot';
+    const name = document.createElement('span'); name.textContent = m.username;
+    b.append(dot, name);
+    if (selMembers.has(m.discordId)) b.classList.add('active');
+    b.onclick = () => { toggle(selMembers, m.discordId, b); updateTargetBadge(); };
+    memberBtns.set(m.discordId, { btn: b, name: m.username });
+    mc.appendChild(b);
+  });
+  renderPresence();                       // ré-applique l'état connu aux puces neuves
 }
 function toggle(set, v, btn) { if (set.has(v)) { set.delete(v); btn.classList.remove('active'); } else { set.add(v); btn.classList.add('active'); } }
-function updateTargetBadge() { const n = selGroups.size + selMembers.size; $('targetBadge').textContent = n ? `${n} targeted` : 'everyone'; $('targetBadge').className = 'badge' + (n ? ' accent' : ''); }
+function updateTargetBadge() {
+  const n = selGroups.size + selMembers.size;
+  $('targetBadge').textContent = n ? `${n} targeted` : 'everyone';
+  $('targetBadge').className = 'badge' + (n ? ' accent' : '');
+  updatePresenceWarn();
+}
+
+// ---- Présence des destinataires -----------------------------------------
+// Un meme n'est remis qu'aux appareils connectés au moment de l'envoi : savoir
+// qui est là — et qui est en « ne pas déranger » — évite de tirer dans le vide.
+// L'éditeur est une page sans WebSocket : il interroge /presence en boucle.
+const memberBtns = new Map();      // discordId -> { btn, name }
+let presence = new Map();          // discordId -> { status, dndUntil }
+let presenceOthers = 0;            // appareils connectés sans membre associé
+let presenceOn = false;            // faux tant qu'on n'a rien reçu (ou flag coupé)
+let presenceTimer = null;
+
+const PRESENCE = {
+  online: { icon: '🟢', label: 'online' },
+  dnd: { icon: '🌙', label: 'do not disturb' },
+  off: { icon: '🔕', label: 'notifications off' },
+  offline: { icon: '⚪', label: 'offline' },
+};
+const PRESENCE_CLASSES = Object.keys(PRESENCE).map((k) => 'st-' + k);
+const hhmm = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+async function refreshPresence() {
+  let p;
+  try { p = await api.getPresence(); }
+  catch { return; }                       // réseau : on garde le dernier état connu
+  presenceOn = p && p.enabled !== false;
+  presence = new Map((p?.members || []).map((m) => [m.discordId, m]));
+  presenceOthers = p?.others || 0;
+  renderPresence();
+}
+
+// Un état inconnu (serveur plus récent que cette page) vaut « hors ligne ».
+function statusOf(discordId) {
+  const st = presence.get(discordId)?.status;
+  return PRESENCE[st] ? st : 'offline';
+}
+function statusText(discordId) {
+  const st = statusOf(discordId);
+  const until = presence.get(discordId)?.dndUntil;
+  return st === 'dnd' && until ? `${PRESENCE.dnd.label} until ${hhmm(until)}` : PRESENCE[st].label;
+}
+
+function renderPresence() {
+  const line = $('presenceLine');
+  if (!presenceOn) { line.classList.add('hidden'); return; }
+  const counts = { online: 0, dnd: 0, off: 0, offline: 0 };
+  for (const [id, { btn }] of memberBtns) {
+    const st = statusOf(id);
+    counts[st]++;
+    btn.classList.remove(...PRESENCE_CLASSES);
+    btn.classList.add('st-' + st);
+    btn.title = statusText(id);
+  }
+  const parts = Object.keys(PRESENCE).filter((k) => counts[k])
+    .map((k) => `${PRESENCE[k].icon} ${counts[k]} ${PRESENCE[k].label}`);
+  if (presenceOthers) parts.push(`+${presenceOthers} unlinked device${presenceOthers > 1 ? 's' : ''}`);
+  line.replaceChildren(...parts.map((t) => { const s = document.createElement('span'); s.textContent = t; return s; }));
+  line.classList.toggle('hidden', parts.length === 0);
+  updatePresenceWarn();
+}
+
+// Destinataires explicitement ciblés qui ne verront rien maintenant : le meme
+// n'est pas rejoué à leur retour, autant le savoir avant d'appuyer sur Envoyer.
+function updatePresenceWarn() {
+  const warn = $('presenceWarn');
+  const unreachable = presenceOn
+    ? [...selMembers].filter((id) => statusOf(id) !== 'online')
+      .map((id) => `${memberBtns.get(id)?.name || id} (${statusText(id)})`)
+    : [];
+  warn.textContent = unreachable.length ? `⚠️ Won't see it right now: ${unreachable.join(', ')}.` : '';
+  warn.classList.toggle('hidden', unreachable.length === 0);
+}
+
+// Rafraîchissement périodique, suspendu quand l'onglet passe en arrière-plan
+// (rien à afficher, et l'éditeur reste ouvert des heures).
+function startPresenceLoop() {
+  clearInterval(presenceTimer);
+  presenceTimer = setInterval(() => { if (!document.hidden) refreshPresence(); }, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshPresence(); });
+}
 
 // ---- Emplacement chez le destinataire (placement direct, intégré) -------
 // Un mini-écran 16/9 dans le panneau : on glisse/redimensionne le cadre du
