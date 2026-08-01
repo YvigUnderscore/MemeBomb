@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Trophy, Crown, Medal, Award, Image as ImageIcon, Film, Music, Type, Flame,
-  MessageCircle, X, Send, Trash2, Archive, Radio,
+  MessageCircle, X, Send, Trash2, Archive, Radio, ThumbsUp, Volume2,
 } from 'lucide-react';
 import { HallAPI } from '../lib/api.js';
 import { usePanelWS } from '../context/PanelWS.jsx';
@@ -36,11 +36,25 @@ function MemeThumb({ m }) {
   );
 }
 
-// Barre de réactions du Hall (comptes panel, toggle).
+// Sons joués à l'apparition du meme : le Hall les rejoue, sinon un meme dont
+// toute la blague est le son y serait muet. Plusieurs sons partent ensemble,
+// comme sur l'overlay du destinataire.
+function MemeSounds({ urls }) {
+  if (!urls?.length) return null;
+  return (
+    <div className="space-y-2">
+      <h4 className="font-bold text-sm flex items-center gap-1.5"><Volume2 size={15} /> Sound{urls.length > 1 ? `s (${urls.length})` : ''}</h4>
+      {urls.map((u) => <audio key={u} src={u} controls autoPlay className="w-full" />)}
+    </div>
+  );
+}
+
+// Barre de vote du Hall (comptes panel, toggle) — un vote compte dans le
+// classement, qu'il tombe le jour même ou des semaines plus tard.
 function HallReactions({ meme, onChange }) {
   const toast = useToast();
   const react = async (emoji) => {
-    try { const r = await HallAPI.react(meme.memeId, emoji); onChange(meme.memeId, r); }
+    try { const r = await HallAPI.react(meme.memeId, emoji); onChange(meme.memeId, r, emoji); }
     catch (e) { toast.error(e.message); }
   };
   return (
@@ -90,7 +104,9 @@ function MemeViewer({ meme, onClose, onReaction }) {
         <div className="flex items-center gap-3 p-4 border-b border-border">
           <div className="flex-1 min-w-0">
             <div className="font-bold truncate">{meme.text || `(${meme.type})`}</div>
-            <div className="text-xs text-muted">by {meme.senderName || meme.sender} · {meme.createdAt ? new Date(meme.createdAt).toLocaleString() : ''} · <Flame size={11} className="inline" /> {meme.reactions} overlay reaction(s)</div>
+            <div className="text-xs text-muted">by {meme.senderName || meme.sender} · {meme.createdAt ? new Date(meme.createdAt).toLocaleString() : ''}
+              {' · '}<Flame size={11} className="inline" /> {meme.reactions} overlay reaction(s)
+              {' · '}<ThumbsUp size={11} className="inline" /> {meme.votes || 0} hall vote(s)</div>
           </div>
           <button className="btn-ghost !px-2.5" onClick={onClose} aria-label="Close"><X size={17} /></button>
         </div>
@@ -113,7 +129,12 @@ function MemeViewer({ meme, onClose, onReaction }) {
           </div>
 
           <div className="p-4 space-y-4">
-            <HallReactions meme={meme} onChange={onReaction} />
+            <MemeSounds urls={meme.soundUrls} />
+
+            <div>
+              <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><ThumbsUp size={15} /> Vote — it counts toward the top 10</h4>
+              <HallReactions meme={meme} onChange={onReaction} />
+            </div>
 
             <div>
               <h4 className="font-bold text-sm mb-2 flex items-center gap-1.5"><MessageCircle size={15} /> Comments {comments ? `(${comments.length})` : ''}</h4>
@@ -209,8 +230,21 @@ export default function Hall() {
     return () => { clearTimeout(t); stop(); };
   }, [channelId, week, panelWS]);
 
-  // Après une réaction Hall : recharge (compteurs + « mes réactions » exacts).
-  const onReaction = () => reloadRef.current();
+  // Après un vote : mise à jour sur place, pour ne pas replier les pages déjà
+  // chargées en mode « tous les memes ». Dans un top, on recharge ensuite : le
+  // vote entre dans le total qui classe, l'ordre peut donc changer.
+  const onReaction = (memeId, r, emoji) => {
+    setData((d) => d && ({
+      ...d,
+      memes: d.memes.map((m) => (m.memeId !== memeId ? m : {
+        ...m, hallReactions: r.counts, votes: r.votes, score: r.score,
+        myReactions: r.mine
+          ? [...(m.myReactions || []), emoji]
+          : (m.myReactions || []).filter((e) => e !== emoji),
+      })),
+    }));
+    if (week !== 'all') reloadRef.current();
+  };
 
   const memes = data?.memes || [];
   const viewerMeme = viewer ? memes.find((m) => m.memeId === viewer) : null;
@@ -221,7 +255,7 @@ export default function Hall() {
         <div className="w-11 h-11 rounded-xl bg-accent-gradient grid place-items-center shadow-glow"><Trophy size={22} className="text-white" /></div>
         <div>
           <h1 className="text-2xl font-extrabold">Hall of Memes</h1>
-          <p className="text-sm text-muted">Browse all PUBLIC memes per channel, or the live weekly top 10 — every past week's top 10 is archived forever.</p>
+          <p className="text-sm text-muted">Browse all PUBLIC memes per channel, or the live weekly top 10 — every past week's top 10 is archived forever. Vote whenever you like: it counts toward the ranking, even weeks later.</p>
         </div>
       </div>
 
@@ -259,8 +293,8 @@ export default function Hall() {
         </div>
       ) : memes.length === 0 ? (
         <EmptyState icon={Trophy}
-          title={week === 'all' ? 'No public memes in this channel yet' : week === 'current' ? 'No memes with reactions this week' : 'No archive for this week'}
-          hint={week === 'current' ? 'As soon as memes get reactions, they will show up here.' : undefined} />
+          title={week === 'all' ? 'No public memes in this channel yet' : week === 'current' ? 'No memes with reactions or votes this week' : 'No archive for this week'}
+          hint={week === 'current' ? 'As soon as memes get a reaction or a vote, they will show up here.' : undefined} />
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {memes.map((m) => {
@@ -277,7 +311,11 @@ export default function Hall() {
                     </div>
                   ) : null}
                   <div className="absolute top-2 right-2 flex gap-1.5">
-                    <Badge tone="accent"><Flame size={12} /> {m.reactions}</Badge>
+                    {/* Le total qui classe : réactions à l'affichage + votes du Hall. */}
+                    <Badge tone="accent" title={`${m.reactions} overlay reaction(s) + ${m.votes || 0} hall vote(s)`}>
+                      <Flame size={12} /> {m.score ?? m.reactions}
+                    </Badge>
+                    {m.soundUrls?.length > 0 && <Badge title="Has sound"><Volume2 size={12} /></Badge>}
                     {m.comments > 0 && <Badge><MessageCircle size={12} /> {m.comments}</Badge>}
                   </div>
                 </div>

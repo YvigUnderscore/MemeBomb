@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Loader2, Check, Copy } from 'lucide-react';
 
-export function Card({ children, className = '' }) {
-  return <div className={`card p-5 animate-fade-in ${className}`}>{children}</div>;
+// `onClick` doit être transmis : sans lui, une carte cliquable (le Hall) est
+// inerte — c'est ce qui empêchait d'ouvrir la visionneuse d'un meme. Une carte
+// cliquable devient aussi atteignable au clavier, sinon elle n'existe que pour
+// la souris.
+export function Card({ children, className = '', onClick }) {
+  const clickable = typeof onClick === 'function';
+  const keyProps = clickable ? {
+    role: 'button', tabIndex: 0,
+    onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); } },
+  } : {};
+  return <div className={`card p-5 animate-fade-in ${className}`} onClick={onClick} {...keyProps}>{children}</div>;
 }
 
 export function Spinner({ className = '' }) {
@@ -40,7 +49,7 @@ export function Toggle({ checked, onChange, label, hint }) {
   );
 }
 
-export function Badge({ children, tone = 'default' }) {
+export function Badge({ children, tone = 'default', title }) {
   const tones = {
     default: 'bg-surface-2 text-muted border border-border',
     accent: 'bg-accent/15 text-accent border border-accent/30',
@@ -48,7 +57,7 @@ export function Badge({ children, tone = 'default' }) {
     danger: 'bg-danger/15 text-danger border border-danger/30',
     warning: 'bg-warning/15 text-warning border border-warning/30',
   };
-  return <span className={`chip ${tones[tone] || tones.default}`}>{children}</span>;
+  return <span className={`chip ${tones[tone] || tones.default}`} title={title}>{children}</span>;
 }
 
 export function Stat({ label, value, icon: Icon, tone = 'accent' }) {

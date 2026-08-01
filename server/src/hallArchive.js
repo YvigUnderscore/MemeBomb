@@ -7,6 +7,7 @@
 
 import { db, now } from './db.js';
 import { copyMediaFile } from './memeService.js';
+import { soundPathsOf } from './retention.js';
 import { logger } from './logger.js';
 
 /** Lundi 00:00 (heure locale) de la semaine contenant `ts`. */
@@ -23,19 +24,24 @@ export function weekKey(d) {
 }
 
 /**
- * Top N memes (avec ≥ 1 réaction) d'un channel sur [from, to).
+ * Top N memes d'un channel sur [from, to), classés au total des réactions
+ * reçues à l'affichage (`cnt`) ET des votes déposés après coup depuis le Hall
+ * (`hall_cnt`) — voter plus tard compte donc autant que réagir sur le moment.
  * PUBLICS uniquement (targets = '[]') : un meme envoyé en privé/à un groupe
- * n'apparaît jamais dans le Hall.
+ * n'apparaît jamais dans le Hall. Les memes à zéro sont écartés.
  */
 export function topMemes(channelId, from, to, limit = 10) {
   return db.prepare(`
-    SELECT m.*, COUNT(r.emoji) AS cnt
-    FROM memes m
-    JOIN meme_reactions r ON r.meme_id = m.id
-    WHERE m.channel_id = ? AND m.status = 'sent' AND m.targets = '[]'
-      AND m.created_at >= ? AND m.created_at < ?
-    GROUP BY m.id
-    ORDER BY cnt DESC, m.created_at ASC
+    SELECT * FROM (
+      SELECT m.*,
+        (SELECT COUNT(*) FROM meme_reactions r WHERE r.meme_id = m.id) AS cnt,
+        (SELECT COUNT(*) FROM hall_reactions h WHERE h.meme_id = m.id) AS hall_cnt
+      FROM memes m
+      WHERE m.channel_id = ? AND m.status = 'sent' AND m.targets = '[]'
+        AND m.created_at >= ? AND m.created_at < ?
+    )
+    WHERE cnt + hall_cnt > 0
+    ORDER BY cnt + hall_cnt DESC, created_at ASC
     LIMIT ?`).all(channelId, from, to, limit);
 }
 
@@ -56,14 +62,22 @@ function archiveWeek(channel, monday) {
   const top = topMemes(channel.id, from, to, 10);
   if (!top.length) return 0;
   const ins = db.prepare(`INSERT INTO hall_archive
-      (channel_id, week, rank, meme_id, sender, sender_name, type, text, media_path, media_mime, reactions, reaction_detail, meme_created_at, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      (channel_id, week, rank, meme_id, sender, sender_name, type, text, media_path, media_mime, sound_paths, reactions, reaction_detail, meme_created_at, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   let n = 0;
   top.forEach((m, i) => {
-    // Copie du média : le fichier original disparaîtra avec la rétention.
+    // Copie du média ET des sons joués à l'apparition : les fichiers d'origine
+    // disparaîtront avec la rétention, et un meme rejoué muet n'est pas le meme.
     const mediaCopy = m.media_path ? copyMediaFile(m.media_path) : null;
+    let options = {};
+    try { options = JSON.parse(m.options || '{}'); } catch { /* ignore */ }
+    const soundCopies = soundPathsOf(options).map(copyMediaFile).filter(Boolean);
+    // `reactions` reste le total des seules réactions d'affichage : les votes du
+    // Hall sont recomptés en direct à la lecture, un vote tardif compte donc
+    // encore après l'archivage (et n'est jamais compté deux fois).
     ins.run(channel.id, key, i + 1, m.id, m.sender, m.sender_name, m.type, m.text,
-      mediaCopy, m.media_mime, m.cnt, JSON.stringify(reactionDetail(m.id)), m.created_at, now());
+      mediaCopy, m.media_mime, JSON.stringify(soundCopies), m.cnt,
+      JSON.stringify(reactionDetail(m.id)), m.created_at, now());
     n++;
   });
   logger.info(`Hall : semaine ${key} archivée pour "${channel.slug}" (${n} meme(s)).`);

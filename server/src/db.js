@@ -277,6 +277,9 @@ try { db.prepare('ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DE
 // Migration douce : IP source des événements d'audit — sans elle, une campagne
 // de brute-force est invisible et non attribuable a posteriori.
 try { db.prepare("ALTER TABLE audit_log ADD COLUMN ip TEXT DEFAULT ''").run(); } catch { /* déjà présent */ }
+// Migration douce : sons joués à l'apparition, copiés dans l'archive du Hall.
+// Sans eux, un meme archivé est muet dès que la rétention a purgé ses fichiers.
+try { db.prepare("ALTER TABLE hall_archive ADD COLUMN sound_paths TEXT DEFAULT '[]'").run(); } catch { /* déjà présent */ }
 
 export function now() {
   return Date.now();

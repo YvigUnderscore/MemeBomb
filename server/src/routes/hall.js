@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { db, now, audit } from '../db.js';
 import { panelAuth } from '../auth.js';
 import { signMediaUrl } from '../memeService.js';
+import { soundPathsOf } from '../retention.js';
 import { weekStart, weekKey, topMemes } from '../hallArchive.js';
 import { asyncHandler } from './helpers.js';
 
@@ -19,6 +20,7 @@ router.use(panelAuth);
 
 const HALL_EMOJI = ['😂', '❤️', '🔥', '💀', '👏', '😮', '👎', '🤡'];
 const isStaff = (u) => u.role === 'admin' || u.role === 'moderator';
+const parseJSON = (v, d) => { try { return v ? JSON.parse(v) : d; } catch { return d; } };
 
 /** Channels visibles par l'utilisateur courant. */
 function accessibleChannels(user) {
@@ -62,11 +64,28 @@ function overlayReactionDetail(memeId) {
   for (const r of db.prepare('SELECT emoji, COUNT(*) c FROM meme_reactions WHERE meme_id = ? GROUP BY emoji').all(memeId)) out[r.emoji] = r.c;
   return out;
 }
+// Sons joués à l'apparition du meme — le Hall les rejoue, sinon un meme dont
+// toute la blague est le son y est muet. Les memes vivants les portent dans
+// leurs options ; les memes archivés en gardent une copie (cf. hallArchive.js).
+function liveSoundUrls(memeId) {
+  const m = db.prepare('SELECT options FROM memes WHERE id = ?').get(memeId);
+  if (!m) return [];
+  let options = {};
+  try { options = JSON.parse(m.options || '{}'); } catch { return []; }
+  return soundPathsOf(options).map(signMediaUrl);
+}
+
 function decorate(userId, item) {
+  const hallReactions = hallReactionCounts(item.memeId);
+  const votes = Object.values(hallReactions).reduce((a, b) => a + b, 0);
   return {
     ...item,
+    // Ce qui classe un meme : ses réactions à l'affichage PLUS les votes
+    // déposés depuis le Hall, y compris longtemps après l'envoi.
+    votes,
+    score: (item.reactions || 0) + votes,
     comments: db.prepare('SELECT COUNT(*) c FROM meme_comments WHERE meme_id = ?').get(item.memeId).c,
-    hallReactions: hallReactionCounts(item.memeId),
+    hallReactions,
     myReactions: db.prepare('SELECT emoji FROM hall_reactions WHERE meme_id = ? AND user_id = ?').all(item.memeId, userId).map((r) => r.emoji),
   };
 }
@@ -98,6 +117,7 @@ router.get('/:channelId/top', requireChannelAccess, asyncHandler((req, res) => {
         reactionDetail: overlayReactionDetail(m.id),
         mediaUrl: m.media_path ? signMediaUrl(m.media_path) : null,
         mediaMime: m.media_mime,
+        soundUrls: liveSoundUrls(m.id),
         createdAt: m.created_at,
       })),
     });
@@ -106,18 +126,23 @@ router.get('/:channelId/top', requireChannelAccess, asyncHandler((req, res) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(week)) return res.status(400).json({ error: 'Invalid week.' });
   const rows = db.prepare('SELECT * FROM hall_archive WHERE channel_id = ? AND week = ? ORDER BY rank ASC')
     .all(req.channelId, week);
-  res.json({
-    week, live: false,
-    memes: rows.map((m) => decorate(req.user.id, {
-      memeId: m.meme_id, rank: m.rank, type: m.type, text: m.text,
-      sender: m.sender, senderName: m.sender_name,
-      reactions: m.reactions,
-      reactionDetail: JSON.parse(m.reaction_detail || '{}'),
-      mediaUrl: m.media_path ? signMediaUrl(m.media_path) : null,
-      mediaMime: m.media_mime,
-      createdAt: m.meme_created_at,
-    })),
-  });
+  // Le classement d'une semaine passée n'est pas figé : les votes déposés
+  // depuis (dans le Hall) s'ajoutent au total et peuvent réordonner ses dix
+  // memes. Le lot archivé, lui, ne change pas — les memes hors top 10 ont
+  // disparu avec la rétention, ils ne peuvent plus y entrer.
+  const memes = rows.map((m) => decorate(req.user.id, {
+    memeId: m.meme_id, rank: m.rank, type: m.type, text: m.text,
+    sender: m.sender, senderName: m.sender_name,
+    reactions: m.reactions,
+    reactionDetail: JSON.parse(m.reaction_detail || '{}'),
+    mediaUrl: m.media_path ? signMediaUrl(m.media_path) : null,
+    mediaMime: m.media_mime,
+    soundUrls: parseJSON(m.sound_paths, []).map(signMediaUrl),
+    createdAt: m.meme_created_at,
+  }));
+  memes.sort((a, b) => b.score - a.score || a.rank - b.rank);
+  memes.forEach((m, i) => { m.rank = i + 1; });
+  res.json({ week, live: false, memes });
 }));
 
 // --- Tous les memes PUBLICS d'un channel (pas seulement le top), paginé ----
@@ -143,6 +168,7 @@ router.get('/:channelId/all', requireChannelAccess, asyncHandler((req, res) => {
       reactionDetail: overlayReactionDetail(m.id),
       mediaUrl: m.media_path ? signMediaUrl(m.media_path) : null,
       mediaMime: m.media_mime,
+      soundUrls: liveSoundUrls(m.id),
       createdAt: m.created_at,
     })),
   });
@@ -173,7 +199,19 @@ router.delete('/comments/:id', asyncHandler((req, res) => {
   res.json({ ok: true });
 }));
 
-// --- Réactions du Hall (toggle) -------------------------------------------
+// --- Votes du Hall (toggle) -----------------------------------------------
+// Voter après coup, sur un meme d'aujourd'hui comme sur une semaine archivée :
+// le vote compte dans le total qui classe le top 10 (cf. topMemes).
+
+// Réactions d'affichage d'un meme : comptées sur le meme vivant, ou reprises du
+// snapshot d'archive quand la rétention l'a purgé.
+function baseReactions(memeId) {
+  const live = db.prepare('SELECT COUNT(*) c FROM meme_reactions WHERE meme_id = ?').get(memeId).c;
+  if (live) return live;
+  return db.prepare('SELECT reactions FROM hall_archive WHERE meme_id = ? ORDER BY created_at DESC LIMIT 1')
+    .get(memeId)?.reactions || 0;
+}
+
 router.post('/memes/:memeId/react', requireMemeAccess, asyncHandler((req, res) => {
   const { emoji } = z.object({ emoji: z.string() }).parse(req.body);
   if (!HALL_EMOJI.includes(emoji)) return res.status(400).json({ error: 'Emoji not allowed.' });
@@ -186,7 +224,9 @@ router.post('/memes/:memeId/react', requireMemeAccess, asyncHandler((req, res) =
     db.prepare('INSERT INTO hall_reactions (meme_id, channel_id, user_id, emoji, created_at) VALUES (?,?,?,?,?)')
       .run(req.params.memeId, req.memeChannelId, req.user.id, emoji, now());
   }
-  res.json({ counts: hallReactionCounts(req.params.memeId), mine: !existing });
+  const counts = hallReactionCounts(req.params.memeId);
+  const votes = Object.values(counts).reduce((a, b) => a + b, 0);
+  res.json({ counts, mine: !existing, votes, score: baseReactions(req.params.memeId) + votes });
 }));
 
 export default router;
