@@ -7,25 +7,45 @@
 // ============================================================
 
 import { HttpError } from './media.js';
+import { logger } from './logger.js';
 
 const HOST_RX = /^(www\.)?myinstants\.com$/i;
 // UA type navigateur : certains CDN refusent les UA exotiques.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-/** Récupère une page myinstants (SSRF-guardé : URL construite ici, jamais reçue). */
-async function fetchInstantsPage(url, what) {
-  try {
-    // URL localisée (/fr/) : le chemin non préfixé renvoie désormais une
-    // redirection 302 — incompatible avec redirect:'error' (anti-SSRF).
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'error',
-    });
+/**
+ * Récupère une page myinstants (SSRF-guardé : URL construite ici, jamais reçue).
+ *
+ * Les redirections sont suivies À LA MAIN, jamais par fetch : chaque saut doit
+ * rester en https sur myinstants.com, sinon on abandonne. `redirect: 'error'`
+ * seul ne suffit pas ici — le site renvoie un 30x sur plusieurs de ses chemins
+ * (préfixe de langue, index par pays) et la page devenait alors injoignable.
+ */
+async function fetchInstantsPage(url, what, hops = 2) {
+  let current = url;
+  for (let i = 0; i <= hops; i++) {
+    let resp;
+    try {
+      resp = await fetch(current, {
+        headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'manual',
+      });
+    } catch (e) {
+      throw new HttpError(502, `${what} unavailable (${e?.cause?.code || e.message || 'network'}).`);
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers.get('location') || '';
+      let next;
+      try { next = new URL(loc, current); } catch { throw new HttpError(502, `${what} unavailable (bad redirect).`); }
+      if (next.protocol !== 'https:' || !HOST_RX.test(next.hostname)) {
+        throw new HttpError(502, `${what} unavailable (off-site redirect).`);
+      }
+      current = next.href;
+      continue;
+    }
     if (!resp.ok) throw new HttpError(502, `${what} unavailable (HTTP ${resp.status}).`);
-    return await resp.text();
-  } catch (e) {
-    if (e instanceof HttpError) throw e;
-    throw new HttpError(502, `${what} unavailable (${e?.cause?.code || e.message || 'network'}).`);
+    return resp.text();
   }
+  throw new HttpError(502, `${what} unavailable (too many redirects).`);
 }
 
 /** Extrait les boutons « instant » d'une page myinstants → [{ title, url }]. */
@@ -61,22 +81,40 @@ export async function searchMyInstants(query, limit = 24) {
 // Pages « tendances » de myinstants, par région. Liste FERMÉE : la région
 // reçue du client sert uniquement de clé ici, jamais de morceau d'URL —
 // aucun chemin arbitraire ne peut donc être fabriqué depuis l'extérieur.
+// Plusieurs chemins par région : le site en a déplacé/redirigé quelques-uns,
+// on prend le premier qui répond ET qui contient des sons.
 export const TRENDING_REGIONS = {
-  world: { label: 'Monde', path: '/fr/' },
-  fr: { label: 'France', path: '/fr/index/fr/' },
-  us: { label: 'États-Unis', path: '/fr/index/us/' },
-  gb: { label: 'Royaume-Uni', path: '/fr/index/gb/' },
-  es: { label: 'Espagne', path: '/fr/index/es/' },
-  de: { label: 'Allemagne', path: '/fr/index/de/' },
-  it: { label: 'Italie', path: '/fr/index/it/' },
-  br: { label: 'Brésil', path: '/fr/index/br/' },
+  world: { label: 'Monde', paths: ['/fr/index/all/', '/fr/', '/en/'] },
+  fr: { label: 'France', paths: ['/fr/index/fr/', '/en/index/fr/'] },
+  us: { label: 'États-Unis', paths: ['/fr/index/us/', '/en/index/us/'] },
+  gb: { label: 'Royaume-Uni', paths: ['/fr/index/gb/', '/en/index/gb/'] },
+  es: { label: 'Espagne', paths: ['/fr/index/es/', '/en/index/es/'] },
+  de: { label: 'Allemagne', paths: ['/fr/index/de/', '/en/index/de/'] },
+  it: { label: 'Italie', paths: ['/fr/index/it/', '/en/index/it/'] },
+  br: { label: 'Brésil', paths: ['/fr/index/br/', '/en/index/br/'] },
 };
 
-/** Sons tendance d'une région → [{ title, url }] (même format que la recherche). */
+/**
+ * Sons tendance d'une région → { results: [{ title, url }], reason }.
+ * Ne LÈVE PAS quand myinstants est injoignable ou a changé de balisage : les
+ * tendances sont un confort, une liste vide (avec la raison, journalisée ET
+ * renvoyée à l'éditeur) vaut mieux qu'un 502 à l'ouverture du popover Son.
+ */
 export async function trendingMyInstants(region = 'world', limit = 24) {
   const entry = TRENDING_REGIONS[String(region || '').toLowerCase()] || TRENDING_REGIONS.world;
-  const html = await fetchInstantsPage(`https://www.myinstants.com${entry.path}`, 'Trending sounds');
-  return parseInstants(html, limit);
+  const reasons = [];
+  for (const p of entry.paths) {
+    try {
+      const results = parseInstants(await fetchInstantsPage(`https://www.myinstants.com${p}`, 'Trending sounds'), limit);
+      if (results.length) return { results, reason: '' };
+      reasons.push(`${p}: aucun son reconnu`);
+    } catch (e) {
+      reasons.push(`${p}: ${e.message}`);
+    }
+  }
+  const reason = reasons.join(' | ');
+  logger.warn(`Tendances myinstants (${region}) indisponibles — ${reason}`);
+  return { results: [], reason };
 }
 
 /** Télécharge un mp3 myinstants (SSRF-guardé, taille plafonnée) → Buffer. */

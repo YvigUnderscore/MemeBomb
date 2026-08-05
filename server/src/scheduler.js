@@ -63,7 +63,7 @@ export async function createSchedule(p) {
   if (!media && !p.text) throw new HttpError(400, 'A schedule needs at least media or text.');
 
   const targets = resolveTargets(channel.id, { groupNames: p.groupNames || [], mentions: p.mentions || [] });
-  const options = sanitizeOptions(p.options || {}, s, media);
+  const options = sanitizeOptions(p.options || {}, s, media, sounds);
   if (overlay) options.overlayPath = overlay.relPath;
   applySoundOptions(options, sounds);
   options.__prepared = { media, overlay, sounds };

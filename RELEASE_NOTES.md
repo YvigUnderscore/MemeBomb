@@ -1,3 +1,10 @@
+# MemeDrop v1.5.1 — "The meme ends, the sound ends"
+
+## 🔧 Client (Windows)
+- A sound no longer outlives the meme it came with. Sounds and videos are stopped when the meme leaves the screen — a detached `<audio>` kept playing under Chromium, so a sound longer than the meme (or a meme deliberately shortened by the sender) went on playing over an empty screen.
+
+---
+
 # MemeDrop v1.5.0 — "Who's around?"
 
 ## ✨ New
