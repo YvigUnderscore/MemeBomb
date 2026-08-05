@@ -499,14 +499,14 @@ function serializeEls() { return els.map((e) => { const c = { ...e }; delete c._
 // (l'image et la couleur le sont) — l'utilisateur le re-choisit si besoin.
 function serializableMedia(m) {
   if (!m) return null;
-  return { name: m.name, kind: m.kind, mime: m.mime, dataUrl: m.dataUrl || null, trim: m.trim || null };
+  return { name: m.name, kind: m.kind, mime: m.mime, dataUrl: m.dataUrl || null, trim: m.trim || null, durMs: m.durMs || 0 };
 }
 // Un File n'est pas sérialisable : d'un son fichier on ne garde que son nom
 // (l'entrée reste visible mais devra être re-choisie après un rechargement).
 function serializableSounds(list) {
   return (list || []).map((s) => (s.assetId
-    ? { assetId: s.assetId, name: s.name, url: s.url || null, trim: s.trim || null }
-    : { name: s.name, mime: s.mime, trim: s.trim || null }));
+    ? { assetId: s.assetId, name: s.name, url: s.url || null, trim: s.trim || null, durMs: s.durMs || 0 }
+    : { name: s.name, mime: s.mime, trim: s.trim || null, durMs: s.durMs || 0 }));
 }
 // La couleur de fond vit dans l'input (updateBg/bake la lisent là) : on la
 // capture ici, sinon undo — et un meme rechargé depuis la bibliothèque —
@@ -521,7 +521,10 @@ function pushHistory() {
   if (history.length > 80) { history.shift(); hIndex--; }
   updateUndoButtons();
 }
-const commit = () => { pushHistory(); refreshStorageMaybe(); updateWeight(); };
+// updateDurationUI : toute modification de la scène peut changer le média le
+// plus long (ajout/suppression/masquage d'un média, découpe ✂) — la durée du
+// meme le suit sans qu'on ait à y penser à chaque appel.
+const commit = () => { pushHistory(); refreshStorageMaybe(); updateWeight(); updateDurationUI(); };
 let _storageT = null;
 function refreshStorageMaybe() { clearTimeout(_storageT); _storageT = setTimeout(refreshStorage, 500); }
 function restore(snap) {
@@ -541,7 +544,7 @@ function restore(snap) {
   Object.assign(options, s.options || {});
   selId = null; $('elCard').classList.add('hidden');
   setBgMode(base.mode); renderElements(); renderStrokes(); renderMiniBox(); renderSounds();
-  updateUndoButtons(); updateWeight();
+  updateUndoButtons(); updateWeight(); updateDurationUI();
 }
 function undo() { if (hIndex > 0) { hIndex--; restore(history[hIndex]); } }
 function redo() { if (hIndex < history.length - 1) { hIndex++; restore(history[hIndex]); } }
@@ -747,9 +750,7 @@ function addVideoLayer(file, info) {
     v.onloadedmetadata = () => {
       el.ratio = (v.videoWidth / v.videoHeight) || 16 / 9;
       el.durMs = Math.round((v.duration || 0) * 1000);
-      // Durée d'affichage : au moins la durée de la vidéo la plus longue.
-      const secs = Math.min(30, Math.ceil((el.durMs || 0) / 1000));
-      if (secs > options.durationS) { options.durationS = secs; $('optDur').value = secs; $('durVal').textContent = secs; }
+      updateDurationUI(); // le meme dure au moins aussi longtemps que ce calque
       renderElements();
     };
     v.src = url;
@@ -862,7 +863,16 @@ function updateBg() {
       v.onloadedmetadata = () => { if (base.media) { base.media.durMs = Math.round((v.duration || 0) * 1000); updateDurationUI(); } };
       v.play?.().catch(() => {});
     }
-    else if (base.media.kind === 'audio') bg.style.background = 'linear-gradient(135deg,#1c1c22,#141418)';
+    else if (base.media.kind === 'audio') {
+      bg.style.background = 'linear-gradient(135deg,#1c1c22,#141418)';
+      // Durée du fond sonore → elle aussi impose la durée du meme.
+      if (!(base.media.durMs > 0)) {
+        const m = base.media;
+        const a = new Audio(); a.preload = 'metadata';
+        a.onloadedmetadata = () => { if (a.duration > 0 && base.media === m) { m.durMs = Math.round(a.duration * 1000); updateDurationUI(); } };
+        a.src = url;
+      }
+    }
     else { im.src = url; im.classList.remove('hidden'); }
   }
 }
@@ -878,6 +888,7 @@ function addSound(s) {
   }
   if (s.assetId && sounds.some((x) => x.assetId === s.assetId)) return false; // déjà attaché
   sounds.push(s);
+  probeSoundDuration(s);
   renderSounds(); commit();
   return true;
 }
@@ -887,6 +898,23 @@ function removeSound(i) {
   sndStop();
   renderSounds(); commit();
 }
+// Durée d'un son : lue dans les métadonnées, puis mémorisée sur l'objet. Elle
+// entre dans le calcul de la durée du meme (le son ne doit pas être coupé par
+// un meme plus court que lui) et borne sa timeline de découpe.
+function probeSoundDuration(s) {
+  if (s.durMs > 0) return;
+  const src = soundSrc(s);
+  if (!src) return;
+  const a = new Audio();
+  a.preload = 'metadata';
+  a.onloadedmetadata = () => {
+    if (!(a.duration > 0) || !sounds.includes(s)) return;
+    s.durMs = Math.round(a.duration * 1000);
+    updateDurationUI();
+  };
+  a.src = src;
+}
+
 // Source lisible d'un son : fichier local (objet URL mis en cache) ou URL signée.
 function soundSrc(s) {
   if (s.file) { if (!s._url) s._url = URL.createObjectURL(s.file); return s._url; }
@@ -1214,7 +1242,7 @@ function trimSound(s) {
   const src = soundSrc(s);
   if (!src) { $('sendErr').textContent = 'This sound must be picked again (file not kept).'; return; }
   openTrimModal({
-    name: s.name || 'Sound', kind: 'audio', src: s.file || src, trim: s.trim,
+    name: s.name || 'Sound', kind: 'audio', src: s.file || src, durHint: s.durMs, trim: s.trim,
     onApply: (t) => { if (t) s.trim = t; else delete s.trim; renderSounds(); commit(); },
   });
 }
@@ -1461,34 +1489,67 @@ loadShared();
 
 // ---- Options d'affichage -----------------------------------------------
 function bindOptions() {
-  $('optDur').oninput = (e) => { options.durationS = +e.target.value; updateDurationUI(); };
+  // Bouger le curseur raccourcit le meme ; le remonter au maximum le remet en
+  // suivi automatique du média le plus long (un média ajouté ensuite rallonge
+  // de nouveau le meme, au lieu de rester bloqué sur l'ancienne valeur).
+  $('optDur').oninput = (e) => {
+    options.durationS = +e.target.value;
+    options.durAuto = options.durationS >= autoDurationS();
+    updateDurationUI();
+  };
+  $('durFull').onclick = () => { options.durAuto = true; updateDurationUI(); commit(); };
   $('optVol').oninput = (e) => { options.volume = +e.target.value / 100; $('volVal').textContent = e.target.value; };
   $('optAnim').onchange = (e) => { options.animation = e.target.value; };
   $('optAnimIn').oninput = (e) => { options.animInMs = +e.target.value; $('animInVal').textContent = (+e.target.value / 1000).toFixed(2); };
   $('optAnimOut').oninput = (e) => { options.animOutMs = +e.target.value; $('animOutVal').textContent = (+e.target.value / 1000).toFixed(2); };
 }
 
-// ---- Durée du meme : badge + auto-calage sur la vidéo -------------------
-// Une vidéo dans le meme impose sa durée (plafonnée par le réglage serveur) ;
-// le meme se termine à la fin de la vidéo.
-function videoDurationS() {
+// ---- Durée du meme : calée sur le média le plus long --------------------
+// Le meme dure aussi longtemps que son média le plus long — vidéos (calques ou
+// fond), fond sonore et sons à l'apparition confondus — et jamais plus : le
+// curseur ne permet que de le RACCOURCIR, ce qui coupe tout d'un coup (ffmpeg
+// borne la composition, l'overlay du destinataire arrête les sons avec le meme).
+// Chaque média compte pour son extrait gardé quand il a été découpé (✂).
+function mediaDurationS() {
   let ms = 0;
-  for (const el of els) if (!el.hidden && el.type === 'video' && el.kind !== 'gif') ms = Math.max(ms, el.durMs || 0);
-  if (base.mode === 'media' && base.media?.kind === 'video') ms = Math.max(ms, base.media.durMs || 0);
+  const keep = (o, dur) => {
+    if (!(dur > 0)) return;
+    const cut = trimRange(o, dur);
+    ms = Math.max(ms, (cut ? cut.e - cut.s : dur) * 1000);
+  };
+  for (const el of els) {
+    if (el.hidden || el.type !== 'video' || el.kind === 'gif') continue;
+    keep(el, (el.durMs || 0) / 1000);
+  }
+  const bg = base.mode === 'media' ? base.media : null;
+  if (bg && ['video', 'audio'].includes(bg.kind)) keep(bg, (bg.durMs || 0) / 1000);
+  for (const s of sounds) keep(s, (s.durMs || 0) / 1000);
   return ms / 1000;
 }
+// Durée « pleine » (entière, plafonnée par le réglage serveur) du meme.
+function autoDurationS() {
+  const media = mediaDurationS();
+  return media > 0 ? clamp(Math.ceil(media), 1, window._maxVideoS || 15) : 0;
+}
 function updateDurationUI() {
-  const vid = videoDurationS();
+  const auto = autoDurationS();
   const slider = $('optDur');
-  if (vid > 0) {
-    options.durationS = clamp(Math.ceil(vid), 1, window._maxVideoS || 15);
-    slider.value = options.durationS;
-    slider.disabled = true;
-    $('durAuto').textContent = '(= video length)';
+  slider.disabled = false;
+  if (auto > 0) {
+    // Le curseur s'arrête à la durée du média le plus long : allonger au-delà
+    // ne ferait que figer la dernière image / laisser du silence.
+    slider.max = auto;
+    if (options.durAuto !== false) options.durationS = auto;
+    options.durationS = clamp(options.durationS, 1, auto);
+    $('durAuto').textContent = options.durationS >= auto
+      ? `(longest media: ${fmtT(mediaDurationS())})`
+      : `(cut from ${fmtT(mediaDurationS())} — everything stops here)`;
   } else {
-    slider.disabled = false;
+    slider.max = Math.max(30, window._maxVideoS || 15);
     $('durAuto').textContent = '';
   }
+  $('durFull').classList.toggle('hidden', !(auto > 0 && options.durationS < auto));
+  slider.value = options.durationS;
   $('durVal').textContent = options.durationS;
   const badge = $('durBadge');
   if (badge) badge.textContent = `⏱ ${options.durationS}s`;

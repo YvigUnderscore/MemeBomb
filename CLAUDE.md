@@ -104,6 +104,12 @@ ne lance ffmpeg pour assembler que si le navigateur ne peut pas.
   figée à `e` **à chaque frame** — `timeupdate` ne bat que ~4 fois par seconde et laisserait passer
   un quart de seconde coupée. Les sons, eux, sont découpés dans l'éditeur (WebAudio → WAV) et partent
   comme un upload ordinaire. Couvert par `server/test/composerTrim.test.js`.
+- **La durée du meme suit le média le plus long** (vidéos, fond sonore, sons à l'apparition, chacun
+  pour son extrait gardé) et le curseur ne sert qu'à la RACCOURCIR. Trois endroits doivent tenir
+  ensemble : `comp.durationS` (ffmpeg borne la composition), le plafond serveur relevé au plafond
+  des sons dès qu'un meme en porte un (`sanitizeOptions`, sinon une image + son de 12 s retombait à
+  8 s), et l'overlay du client qui **coupe les médias avant de retirer la scène** — un `<audio>`
+  détaché continue de jouer sous Chromium. Couvert par `server/test/memeDuration.test.js`.
 - **Le fond transparent reste composé par le serveur** : `MediaRecorder` ne conserve pas l'alpha sous
   Chromium, et déléguer ce cas imposerait de stocker un WebM client sans le ré-encoder.
 - Toute branche qui accepte un média doit contrôler le feature-flag `video`/`audio` **après**

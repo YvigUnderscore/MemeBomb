@@ -259,7 +259,7 @@ export async function createAndDispatchMeme(p) {
   });
 
   // 6. Options d'affichage (bornées).
-  const options = sanitizeOptions(p.options || {}, settings, media);
+  const options = sanitizeOptions(p.options || {}, settings, media, sounds);
   if (overlay) options.overlayPath = overlay.relPath;
   applySoundOptions(options, sounds);
   // Mémorise les groupes ciblés (feed Discord des memes sortis de la file).
@@ -536,15 +536,19 @@ const clamp = (v, min, max, dflt) => {
 };
 
 /** Borne les options d'affichage envoyées par le client/bot (jamais de confiance aveugle). */
-export function sanitizeOptions(o, settings, media) {
+export function sanitizeOptions(o, settings, media, sounds = []) {
   const kind = media ? media.type : 'text';
-  const maxDur = {
+  let maxDur = {
     image: settings.maxImageDurationS || 8,
     gif: settings.maxGifDurationS || 10,
     video: settings.maxVideoDurationS || 15,
     audio: settings.maxAudioDurationS || 15,
     text: settings.maxImageDurationS || 8,
   }[kind];
+  // Un meme qui porte des sons dure au moins ce que dure un son : sans ça une
+  // image accompagnée d'un son de 12 s était ramenée au plafond des images
+  // (8 s) et le son se faisait couper. Le plafond des sons reste le maximum.
+  if (sounds?.length) maxDur = Math.max(maxDur, settings.maxAudioDurationS || 15);
   return {
     // Emplacement/anchor sur l'écran du destinataire (le client borne aussi).
     anchor: ['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right']

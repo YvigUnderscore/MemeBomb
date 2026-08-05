@@ -471,6 +471,15 @@
   }
 
   function done(meme, stage) {
+    // Couper le son AVANT de retirer la scène : un <audio>/<video> détaché du
+    // document continue de jouer sous Chromium. Un son plus long que le meme
+    // (ou un meme volontairement raccourci par l'expéditeur) continuait donc
+    // à s'entendre alors que plus rien n'était affiché.
+    if (stage) {
+      for (const m of stage.querySelectorAll('audio, video')) {
+        try { m.pause(); m.removeAttribute('src'); m.load(); } catch { /* ignore */ }
+      }
+    }
     if (stage && stage.parentNode) stage.remove();
     active = Math.max(0, active - 1);
     try { api.memeFinished(meme.id); } catch {}
