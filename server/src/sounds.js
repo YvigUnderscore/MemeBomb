@@ -95,25 +95,26 @@ export const TRENDING_REGIONS = {
 };
 
 /**
- * Sons tendance d'une région → [{ title, url }] (même format que la recherche).
+ * Sons tendance d'une région → { results: [{ title, url }], reason }.
  * Ne LÈVE PAS quand myinstants est injoignable ou a changé de balisage : les
- * tendances sont un confort, une liste vide (et un log) vaut mieux qu'un 502
- * sur l'ouverture du popover Son.
+ * tendances sont un confort, une liste vide (avec la raison, journalisée ET
+ * renvoyée à l'éditeur) vaut mieux qu'un 502 à l'ouverture du popover Son.
  */
 export async function trendingMyInstants(region = 'world', limit = 24) {
   const entry = TRENDING_REGIONS[String(region || '').toLowerCase()] || TRENDING_REGIONS.world;
   const reasons = [];
   for (const p of entry.paths) {
     try {
-      const list = parseInstants(await fetchInstantsPage(`https://www.myinstants.com${p}`, 'Trending sounds'), limit);
-      if (list.length) return list;
+      const results = parseInstants(await fetchInstantsPage(`https://www.myinstants.com${p}`, 'Trending sounds'), limit);
+      if (results.length) return { results, reason: '' };
       reasons.push(`${p}: aucun son reconnu`);
     } catch (e) {
       reasons.push(`${p}: ${e.message}`);
     }
   }
-  logger.warn(`Tendances myinstants (${region}) indisponibles — ${reasons.join(' | ')}`);
-  return [];
+  const reason = reasons.join(' | ');
+  logger.warn(`Tendances myinstants (${region}) indisponibles — ${reason}`);
+  return { results: [], reason };
 }
 
 /** Télécharge un mp3 myinstants (SSRF-guardé, taille plafonnée) → Buffer. */

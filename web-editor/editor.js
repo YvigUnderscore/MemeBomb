@@ -1403,7 +1403,12 @@ async function loadTrending(region) {
     sel.value = region || 'world';
   }
   const list = res.results || [];
-  if (!list.length) { box.innerHTML = '<div class="muted small">No trending sound right now.</div>'; return; }
+  if (!list.length) {
+    const msg = document.createElement('div'); msg.className = 'muted small';
+    msg.textContent = res.reason ? `No trending sound (${res.reason}). Search still works.` : 'No trending sound right now.';
+    box.appendChild(msg);
+    return;
+  }
   for (const r of list) box.appendChild(sbResultItem(r));
 }
 $('sbRegion').onchange = () => loadTrending($('sbRegion').value);

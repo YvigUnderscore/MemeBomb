@@ -242,9 +242,12 @@ router.get('/sounds/search', deviceAuth, asyncHandler(async (req, res) => {
 // par région (idée d'Epi — trouver des sons quand on n'a pas d'idée).
 router.get('/sounds/trending', deviceAuth, asyncHandler(async (req, res) => {
   const region = z.object({ region: z.string().max(10).optional().default('world') }).parse(req.query).region;
+  const { results, reason } = await trendingMyInstants(region);
   res.json({
     regions: Object.entries(TRENDING_REGIONS).map(([id, r]) => ({ id, label: r.label })),
-    results: await trendingMyInstants(region),
+    results,
+    // Raison de l'échec plutôt qu'une liste vide muette (le popover l'affiche).
+    reason: reason || undefined,
   });
 }));
 
