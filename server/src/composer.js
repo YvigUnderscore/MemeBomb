@@ -89,7 +89,7 @@ function sanitizeQuad(q) {
  * Fond « Aucun » → WebM VP9 AVEC TRANSPARENCE (alpha) : le destinataire voit
  * les calques flotter sur son écran, sans rectangle noir autour.
  * @param {Buffer[]} layerBuffers  fichiers dans l'ordre de comp.layers (z croissant)
- * @param {object} comp  { bg: '#rrggbb'|null, durationS, layers: [{full?, xPct,yPct,wPct,rot,opacity}] }
+ * @param {object} comp  { bg: '#rrggbb'|null, durationS, layers: [{full?, mute?, xPct,yPct,wPct,rot,opacity}] }
  * @param {Buffer|null} overlayBuffer  PNG transparent 1280x720 gravé au-dessus
  * @param {object} settings  réglages du channel (limites)
  * @returns {Promise<{buffer: Buffer, mime: string, transparent: boolean}>}
@@ -140,7 +140,11 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
       try {
         const info = await ffprobeFile(tmps[i]);
         metas[i].durationS = Number(info.format?.duration) || 0;
+        // `mute` : calque coupé à la demande de l'éditeur (bouton 🔊/🔇). La
+        // piste existe toujours dans le fichier, elle est simplement écartée
+        // du mixage — comme le fait l'encodage navigateur de son côté.
         metas[i].hasAudio = metas[i].kind === 'video'
+          && !descs[i]?.mute
           && (info.streams || []).some((s) => s.codec_type === 'audio');
         const vs = (info.streams || []).find((s) => s.width);
         metas[i].w = vs?.width || 0;

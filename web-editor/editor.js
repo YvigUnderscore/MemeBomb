@@ -370,6 +370,15 @@ function renderLayers() {
       row.classList.remove('drag-over');
       if (dragLayerId) reorderLayer(dragLayerId, el.id);
     });
+    // Son du calque vidéo : conservé par défaut, coupé sur demande. Le réglage
+    // suit la vidéo jusqu'à l'envoi (composition navigateur ET serveur).
+    if (el.type === 'video' && el.kind !== 'gif') {
+      const snd = document.createElement('button');
+      snd.textContent = el.muted ? '🔇' : '🔊';
+      snd.title = el.muted ? 'Sound off — click to keep the video sound' : 'Sound on — click to mute this video';
+      snd.onclick = (e) => { e.stopPropagation(); el.muted = !el.muted; renderElements(); commit(); };
+      row.appendChild(snd);
+    }
     const vis = document.createElement('button'); vis.textContent = el.hidden ? '🚫' : '👁'; vis.title = 'Show/hide';
     vis.onclick = (e) => { e.stopPropagation(); el.hidden = !el.hidden; renderElements(); commit(); };
     const del = document.createElement('button'); del.textContent = '🗑'; del.className = 'danger'; del.onclick = (e) => { e.stopPropagation(); els = els.filter((x) => x.id !== el.id); if (selId === el.id) { selId = null; $('elCard').classList.add('hidden'); } renderElements(); commit(); };
@@ -566,8 +575,15 @@ function closeToolPops(except) {
   Object.values(TOOL_POPS).forEach((id) => { if (id !== except) $(id).classList.add('hidden'); });
 }
 Object.entries(TOOL_POPS).forEach(([btn, pop]) => {
-  $(btn).onclick = () => { closeToolPops(pop); $(pop).classList.toggle('hidden'); };
+  $(btn).onclick = () => {
+    closeToolPops(pop);
+    $(pop).classList.toggle('hidden');
+    if (pop === 'soundPop' && !$(pop).classList.contains('hidden')) onSoundPopOpen();
+  };
 });
+// Première ouverture du popover Son : charge les tendances (appel réseau
+// sortant, donc jamais au démarrage de l'éditeur).
+function onSoundPopOpen() { if (!sbTrendLoaded) loadTrending(); }
 
 document.addEventListener('click', (e) => {
   ctxMenu.classList.add('hidden');
@@ -700,6 +716,9 @@ function addVideoLayer(file, info) {
   const url = URL.createObjectURL(file);
   const el = {
     id: rid(), type: 'video', kind: info.kind, name: file.name, ratio: 16 / 9,
+    // Le son de la vidéo importée est CONSERVÉ par défaut (bouton 🔊/🔇 dans la
+    // liste des calques). Un GIF n'a jamais de piste audio.
+    muted: false,
     xPct: 0.5, yPct: 0.5, wPct: 0.5, rot: 0, opacity: 1,
     z: els.length ? Math.max(...els.map((x) => x.z)) + 1 : 0,
   };
@@ -858,19 +877,47 @@ function soundSrc(s) {
   return s.url || null;
 }
 
-let sndAudio = null;
-function sndStop() {
-  if (sndAudio) { sndAudio.pause(); sndAudio = null; }
-  document.querySelectorAll('.sound-row.playing').forEach((n) => n.classList.remove('playing'));
+// ---- Lecteur d'écoute UNIQUE (sons attachés, soundboard, bibliothèque) ----
+// Un seul son est testé à la fois, quel que soit l'endroit d'où on le lance.
+// Recliquer sur le bouton du son en cours le met en PAUSE (puis le reprend là
+// où il s'est arrêté) au lieu de le relancer depuis le début.
+let sndPlayer = null; // { audio, key, btn, node }
+function sndIcon() {
+  if (sndPlayer?.btn) sndPlayer.btn.textContent = sndPlayer.audio.paused ? '▶' : '⏸';
 }
-function sndPlay(s, row) {
+function sndStop() {
+  if (sndPlayer) {
+    try { sndPlayer.audio.pause(); } catch { /* ignore */ }
+    if (sndPlayer.btn) sndPlayer.btn.textContent = '▶';
+    sndPlayer = null;
+  }
+  document.querySelectorAll('.playing').forEach((n) => n.classList.remove('playing'));
+}
+// `key` identifie le son (objet du son attaché, URL myinstants, id d'asset) :
+// c'est lui qui distingue « remettre en pause » de « jouer un autre son ».
+function sndToggle(key, src, { node = null, btn = null } = {}) {
+  if (sndPlayer && sndPlayer.key === key) {
+    const { audio } = sndPlayer;
+    // Le bouton peut venir d'un rendu plus récent que celui qui a lancé le son.
+    sndPlayer.btn = btn || sndPlayer.btn; sndPlayer.node = node || sndPlayer.node;
+    if (audio.paused) { audio.volume = siteVolume; audio.play().catch(() => {}); sndPlayer.node?.classList.add('playing'); }
+    else { audio.pause(); sndPlayer.node?.classList.remove('playing'); }
+    sndIcon();
+    return;
+  }
   sndStop();
+  const audio = new Audio(src);
+  audio.volume = siteVolume;
+  sndPlayer = { audio, key, btn, node };
+  node?.classList.add('playing');
+  audio.onended = () => sndStop();
+  audio.play().catch(() => {});
+  sndIcon();
+}
+function sndPlay(s, row, btn) {
   const src = soundSrc(s);
   if (!src) { $('sendErr').textContent = 'This sound must be picked again (file not kept).'; return; }
-  sndAudio = new Audio(src); sndAudio.volume = siteVolume;
-  row?.classList.add('playing');
-  sndAudio.play().catch(() => {});
-  sndAudio.onended = () => sndStop();
+  sndToggle(s, src, { node: row, btn });
 }
 
 function renderSounds() {
@@ -893,8 +940,14 @@ function renderSounds() {
     const tag = document.createElement('span');
     tag.className = 'stag'; tag.textContent = s.assetId ? 'library' : (s.file ? 'file' : 'missing');
     const play = document.createElement('button');
-    play.textContent = '▶'; play.title = 'Preview';
-    play.onclick = () => sndPlay(s, row);
+    play.textContent = '▶'; play.title = 'Preview (click again to pause)';
+    play.onclick = () => sndPlay(s, row, play);
+    // Le son en cours survit au re-rendu de la liste : on lui rebranche sa ligne.
+    if (sndPlayer && sndPlayer.key === s) {
+      sndPlayer.btn = play; sndPlayer.node = row;
+      if (!sndPlayer.audio.paused) row.classList.add('playing');
+      sndIcon();
+    }
     const del = document.createElement('button');
     del.textContent = '🗑'; del.title = 'Remove this sound';
     del.onclick = () => removeSound(i);
@@ -917,6 +970,7 @@ $('soundsBrowse').onclick = (e) => {
   e.stopPropagation();
   closeToolPops('soundPop');
   $('soundPop').classList.remove('hidden');
+  onSoundPopOpen();
 };
 renderSounds();
 
@@ -938,7 +992,7 @@ function updateSiteVolIcon() {
     localStorage.setItem('md_site_volume', String(Math.round(siteVolume * 100)));
     updateSiteVolIcon();
     // Applique en direct à ce qui joue déjà.
-    if (sbAudio) sbAudio.volume = siteVolume;
+    if (sndPlayer) sndPlayer.audio.volume = siteVolume;
     document.querySelectorAll('#previewScreen video, #previewScreen audio').forEach((m) => { m.volume = localVol(m._baseVol); });
     for (const a of pvAudios) a.volume = localVol(a._baseVol);
   };
@@ -990,14 +1044,17 @@ async function doGifSearch() {
 }
 
 // ---- Soundboard myinstants (#13) ---------------------------------------
-let sbAudio = null;
-function sbStop() { if (sbAudio) { sbAudio.pause(); sbAudio = null; } document.querySelectorAll('.sb-item.playing').forEach((n) => n.classList.remove('playing')); }
-function sbPlay(src, node) {
-  sbStop();
-  sbAudio = new Audio(src); node?.classList.add('playing');
-  sbAudio.volume = siteVolume;
-  sbAudio.play().catch(() => {});
-  sbAudio.onended = () => sbStop();
+// Écoute d'un son déjà accessible par URL (bibliothèque, soundboard partagé) :
+// même lecteur unique que les sons attachés, donc même pause au reclic.
+function sbPlay(src, node, btn) { sndToggle(src, src, { node, btn }); }
+// Écoute d'un son myinstants : le mp3 passe par le proxy serveur (CSP). Le
+// téléchargement n'a lieu qu'au premier démarrage — reprendre après une pause
+// ne redemande rien au serveur.
+async function sbRemotePlay(url, node, btn) {
+  if (sndPlayer && sndPlayer.key === url) { sndToggle(url, null, { node, btn }); return; }
+  const d = await api.previewSound(url);
+  if (d && d.error) { $('sbMsg').textContent = d.error; return; }
+  sndToggle(url, d, { node, btn });
 }
 function useLibrarySound(asset) {
   // url : sert à l'aperçu local ; le serveur, lui, retrouve le son par son id.
@@ -1009,6 +1066,21 @@ function useLibrarySound(asset) {
 
 $('sbSearch').onclick = doSbSearch;
 $('sbQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSbSearch(); });
+
+// Ligne « son myinstants » (écoute + import), partagée par la recherche et par
+// la liste des tendances.
+function sbResultItem(r) {
+  const item = document.createElement('div'); item.className = 'sb-item';
+  const name = document.createElement('span'); name.className = 'sb-name'; name.textContent = r.title; name.title = r.title;
+  const play = document.createElement('button'); play.className = 'btn btn-ghost'; play.textContent = '▶';
+  play.title = 'Listen (click again to pause)';
+  play.onclick = () => sbRemotePlay(r.url, item, play);
+  const imp = document.createElement('button'); imp.className = 'btn btn-ghost'; imp.textContent = 'Import';
+  imp.onclick = async () => { imp.disabled = true; imp.textContent = '…'; try { await api.importSound(r.url, r.title); $('sbMsg').textContent = `« ${r.title} » added to your library.`; refreshStorage(); loadLibrary(); } catch (e) { $('sbMsg').textContent = e.message; } finally { imp.disabled = false; imp.textContent = 'Import'; } };
+  item.append(name, play, imp);
+  return item;
+}
+
 async function doSbSearch() {
   const q = $('sbQuery').value.trim();
   const box = $('sbResults'); box.replaceChildren();
@@ -1017,16 +1089,36 @@ async function doSbSearch() {
   const res = await api.searchSounds(q);
   if (res && res.error) { $('sbMsg').textContent = res.error; return; }
   $('sbMsg').textContent = res.length ? '' : 'No results.';
-  for (const r of res) {
-    const item = document.createElement('div'); item.className = 'sb-item';
-    const name = document.createElement('span'); name.className = 'sb-name'; name.textContent = r.title; name.title = r.title;
-    const play = document.createElement('button'); play.className = 'btn btn-ghost'; play.textContent = '▶';
-    play.onclick = async () => { const d = await api.previewSound(r.url); if (d && d.error) { $('sbMsg').textContent = d.error; return; } sbPlay(d, item); };
-    const imp = document.createElement('button'); imp.className = 'btn btn-ghost'; imp.textContent = 'Import';
-    imp.onclick = async () => { imp.disabled = true; imp.textContent = '…'; try { await api.importSound(r.url, r.title); $('sbMsg').textContent = `« ${r.title} » added to your library.`; refreshStorage(); loadLibrary(); } catch (e) { $('sbMsg').textContent = e.message; } finally { imp.disabled = false; imp.textContent = 'Import'; } };
-    item.append(name, play, imp); box.appendChild(item);
-  }
+  for (const r of res) box.appendChild(sbResultItem(r));
 }
+
+// --- Tendances myinstants (idée d'Epi) ----------------------------------
+// Parcourir la soundboard sans rien avoir à chercher : les sons du moment,
+// par région. Chargé à la PREMIÈRE ouverture du popover Son (pas au démarrage
+// de l'éditeur : c'est un appel réseau sortant qu'on ne fait qu'à la demande).
+let sbTrendLoaded = false;
+async function loadTrending(region) {
+  const box = $('sbTrending'); if (!box) return;
+  sbTrendLoaded = true;
+  box.replaceChildren();
+  const wait = document.createElement('div'); wait.className = 'muted small'; wait.textContent = 'Loading…';
+  box.appendChild(wait);
+  const res = await api.trendingSounds(region || $('sbRegion').value);
+  box.replaceChildren();
+  if (res && res.error) { box.innerHTML = '<div class="muted small"></div>'; box.firstChild.textContent = res.error; return; }
+  // Le serveur renvoie la liste des régions disponibles : le sélecteur est
+  // rempli à partir d'elle, jamais dupliqué dans le HTML.
+  const sel = $('sbRegion');
+  if (!sel.options.length && Array.isArray(res.regions)) {
+    for (const r of res.regions) { const o = document.createElement('option'); o.value = r.id; o.textContent = r.label; sel.appendChild(o); }
+    sel.value = region || 'world';
+  }
+  const list = res.results || [];
+  if (!list.length) { box.innerHTML = '<div class="muted small">No trending sound right now.</div>'; return; }
+  for (const r of list) box.appendChild(sbResultItem(r));
+}
+$('sbRegion').onchange = () => loadTrending($('sbRegion').value);
+$('sbTrendReload').onclick = () => loadTrending($('sbRegion').value);
 
 // --- Ma bibliothèque : favoris & catégories (#9) -------------------------
 let libSounds = [];
@@ -1058,7 +1150,8 @@ function renderLibrary() {
     fav.onclick = async () => { try { await api.updateAsset(a.id, { favorite: !a.data?.favorite }); a.data = { ...(a.data || {}), favorite: !a.data?.favorite }; renderLibrary(); } catch { /* ignore */ } };
     const name = document.createElement('span'); name.className = 'sb-name'; name.textContent = a.name; name.title = a.name;
     const play = document.createElement('button'); play.className = 'btn btn-ghost'; play.textContent = '▶';
-    play.onclick = () => { if (a.url) sbPlay(a.url, item); };
+    play.title = 'Listen (click again to pause)';
+    play.onclick = () => { if (a.url) sbPlay(a.url, item, play); };
     const cat = document.createElement('button'); cat.className = 'btn btn-ghost'; cat.textContent = '🏷';
     cat.title = 'Catégorie'; cat.onclick = async () => {
       const v = prompt('Sound category:', a.data?.category || ''); if (v === null) return;
@@ -1095,7 +1188,8 @@ async function loadShared() {
       const item = document.createElement('div'); item.className = 'sb-item';
       const name = document.createElement('span'); name.className = 'sb-name'; name.textContent = a.name; name.title = a.name;
       const play = document.createElement('button'); play.className = 'btn btn-ghost'; play.textContent = '▶';
-      play.onclick = () => { if (a.url) sbPlay(a.url, item); };
+      play.title = 'Listen (click again to pause)';
+      play.onclick = () => { if (a.url) sbPlay(a.url, item, play); };
       const use = document.createElement('button'); use.className = 'btn btn-ghost'; use.textContent = 'Use';
       use.onclick = () => useLibrarySound(a);
       item.append(name, play, use); box.appendChild(item);
@@ -1578,6 +1672,9 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
     // réutilisent le <img> vivant de la scène (un GIF hors écran n'anime pas).
     const sources = new Map();
     const videoEls = [];
+    // Sous-ensemble de `videoEls` dont la piste entre dans le mixage : un calque
+    // muet est joué (il faut ses images) mais n'alimente pas le graphe WebAudio.
+    const audioEls = [];
 
     // Fond média plein cadre (scène opaque, cf. sceneIsTransparent). Une vidéo
     // de fond reçoit sa propre source — et son audio entre dans le mix, comme
@@ -1588,7 +1685,7 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
       if (plan.bgMedia.kind === 'video') {
         const url = URL.createObjectURL(plan.bgMedia.file); urls.push(url);
         bgSource = await openEncodeVideo(url);
-        videoEls.push(bgSource);
+        videoEls.push(bgSource); audioEls.push(bgSource);
       } else {
         bgSource = bgVisualEl(plan.bgMedia);
       }
@@ -1600,6 +1697,10 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
       const url = URL.createObjectURL(file); urls.push(url);
       const v = await openEncodeVideo(url);
       sources.set(el.id, v); videoEls.push(v);
+      if (!el.muted) audioEls.push(v);
+      // Un élément dont la sortie n'est PAS détournée vers WebAudio sortirait
+      // sur les haut-parleurs pendant l'encodage : on le coupe explicitement.
+      else v.muted = true;
     }
 
     const canvas = document.createElement('canvas'); canvas.width = EW; canvas.height = EH;
@@ -1609,12 +1710,12 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
     // captureStream() d'un canvas ne porte AUCUNE piste audio : on mixe
     // nous-mêmes celles des calques vidéo. Pas de normalisation de sonie ici —
     // le serveur applique déjà un loudnorm EBU R128 au ré-encodage.
-    if (videoEls.length) {
+    if (audioEls.length) {
       const actx = new (window.AudioContext || window.webkitAudioContext)();
       teardown.push(() => { try { actx.close(); } catch { /* ignore */ } });
       if (actx.state === 'suspended') { try { await actx.resume(); } catch { /* ignore */ } }
       const dest = actx.createMediaStreamDestination();
-      for (const v of videoEls) {
+      for (const v of audioEls) {
         try { actx.createMediaElementSource(v).connect(dest); }
         catch (e) { console.warn('[compose] piste audio ignorée :', e.message); }
       }
@@ -1821,6 +1922,7 @@ function buildPayload() {
     }
     for (const el of vids) {
       const L = { xPct: el.xPct, yPct: el.yPct, wPct: el.wPct, rot: el.rot, opacity: el.opacity };
+      if (el.muted) L.mute = true; // le composer serveur écarte cette piste du mixage
       if (hasQuad(el)) L.quad = videoQuadPx(el); // déformation (corner pin) appliquée par ffmpeg
       files.push({ file: mediaFiles.get(el.id).file, filename: el.name || 'layer' });
       layers.push(L);
@@ -2412,7 +2514,8 @@ function renderPreview() {
     }
     for (const el of pvVids) {
       const mf = mediaFiles.get(el.id); if (!mf) continue;
-      const n = el.kind === 'gif' ? (() => { const i = document.createElement('img'); i.src = mf.url; return i; })() : pvVideo(mf.url, vol);
+      // Un calque coupé (🔇) reste muet dans l'aperçu, comme chez le destinataire.
+      const n = el.kind === 'gif' ? (() => { const i = document.createElement('img'); i.src = mf.url; return i; })() : pvVideo(mf.url, el.muted ? 0 : vol);
       n.className = 'pv-el';
       const nw = el.wPct * w, nh = nw / el.ratio;
       const distort = hasQuad(el) ? ` ${cssMatrix3d(el, nw, nh)}` : '';

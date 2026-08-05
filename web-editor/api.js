@@ -133,6 +133,7 @@
     deleteAsset: (id) => api('DELETE', '/api/client/assets/' + encodeURIComponent(id)),
     updateAsset: (id, patch) => api('PATCH', '/api/client/assets/' + encodeURIComponent(id), { json: patch }),
     searchSounds: (q) => api('GET', '/api/client/sounds/search?q=' + encodeURIComponent(q || '')).catch((e) => ({ error: e.message })),
+    trendingSounds: (region) => api('GET', '/api/client/sounds/trending?region=' + encodeURIComponent(region || 'world')).catch((e) => ({ error: e.message })),
     importSound: (url, name) => api('POST', '/api/client/sounds/import', { json: { url, name } }),
     previewSound: async (url) => {
       try { const res = await api('GET', '/api/client/sounds/preview?url=' + encodeURIComponent(url), { raw: true }); return URL.createObjectURL(await res.blob()); }

@@ -94,6 +94,10 @@ ne lance ffmpeg pour assembler que si le navigateur ne peut pas.
   « Aucun » et imposait un VP9 alpha à des scènes opaques. Le serveur retombe sur cette règle quand
   le champ est absent — indispensable tant qu'un `editor.js` peut être servi depuis un cache.
   Couvert par `server/test/composerTransparency.test.js`.
+- **`comp.layers[].mute`** suit le même contrat : un calque vidéo garde son son par défaut, le
+  bouton 🔇 de la liste des calques met le drapeau. Les deux chemins doivent l'appliquer — le
+  serveur écarte la piste du mixage ([server/src/composer.js](server/src/composer.js)), l'encodage
+  navigateur ne la branche pas sur le graphe WebAudio. Couvert par `server/test/composerMute.test.js`.
 - **Le fond transparent reste composé par le serveur** : `MediaRecorder` ne conserve pas l'alpha sous
   Chromium, et déléguer ce cas imposerait de stocker un WebM client sans le ré-encoder.
 - Toute branche qui accepte un média doit contrôler le feature-flag `video`/`audio` **après**
