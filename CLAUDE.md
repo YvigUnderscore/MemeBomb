@@ -98,6 +98,12 @@ ne lance ffmpeg pour assembler que si le navigateur ne peut pas.
   bouton 🔇 de la liste des calques met le drapeau. Les deux chemins doivent l'appliquer — le
   serveur écarte la piste du mixage ([server/src/composer.js](server/src/composer.js)), l'encodage
   navigateur ne la branche pas sur le graphe WebAudio. Couvert par `server/test/composerMute.test.js`.
+- **`comp.layers[].trim`** (`{ s, e }`, secondes) porte la découpe ✂ : l'éditeur ne mémorise qu'un
+  intervalle, le fichier n'est jamais retouché. Serveur : `-ss`/`-t` **avant** l'entrée, et l'extrait
+  gardé est ce qui compte dans la durée de la scène. Navigateur : la source démarre à `s` et est
+  figée à `e` **à chaque frame** — `timeupdate` ne bat que ~4 fois par seconde et laisserait passer
+  un quart de seconde coupée. Les sons, eux, sont découpés dans l'éditeur (WebAudio → WAV) et partent
+  comme un upload ordinaire. Couvert par `server/test/composerTrim.test.js`.
 - **Le fond transparent reste composé par le serveur** : `MediaRecorder` ne conserve pas l'alpha sous
   Chromium, et déléguer ce cas imposerait de stocker un WebM client sans le ré-encoder.
 - Toute branche qui accepte un média doit contrôler le feature-flag `video`/`audio` **après**

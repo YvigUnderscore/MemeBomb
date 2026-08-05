@@ -264,6 +264,15 @@ function buildNode(el) {
     const v = document.createElement('video');
     v.src = mediaFiles.get(el.id)?.url || '';
     v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
+    // La vignette de la scène boucle sur l'extrait gardé : la découpe se voit
+    // sans avoir à ouvrir l'aperçu.
+    v.addEventListener('timeupdate', () => {
+      const c = els.find((x) => x.id === el.id);
+      const cut = c && trimRange(c, v.duration || 0);
+      if (cut && (v.currentTime >= cut.e || v.currentTime < cut.s - 0.05)) {
+        try { v.currentTime = cut.s; } catch { /* ignore */ }
+      }
+    });
     node.appendChild(v);
     v.play?.().catch(() => {});
   } else { // image ou gif (un gif s'anime nativement dans <img>)
@@ -373,6 +382,12 @@ function renderLayers() {
     // Son du calque vidéo : conservé par défaut, coupé sur demande. Le réglage
     // suit la vidéo jusqu'à l'envoi (composition navigateur ET serveur).
     if (el.type === 'video' && el.kind !== 'gif') {
+      const cut = document.createElement('button');
+      cut.textContent = '✂';
+      cut.title = el.trim ? `Cut: ${fmtT(el.trim.s)} → ${fmtT(el.trim.e)} — click to adjust` : 'Cut this video';
+      if (el.trim) cut.style.color = 'var(--accent)';
+      cut.onclick = (e) => { e.stopPropagation(); trimVideoLayer(el); };
+      row.appendChild(cut);
       const snd = document.createElement('button');
       snd.textContent = el.muted ? '🔇' : '🔊';
       snd.title = el.muted ? 'Sound off — click to keep the video sound' : 'Sound on — click to mute this video';
@@ -484,14 +499,14 @@ function serializeEls() { return els.map((e) => { const c = { ...e }; delete c._
 // (l'image et la couleur le sont) — l'utilisateur le re-choisit si besoin.
 function serializableMedia(m) {
   if (!m) return null;
-  return { name: m.name, kind: m.kind, mime: m.mime, dataUrl: m.dataUrl || null };
+  return { name: m.name, kind: m.kind, mime: m.mime, dataUrl: m.dataUrl || null, trim: m.trim || null };
 }
 // Un File n'est pas sérialisable : d'un son fichier on ne garde que son nom
 // (l'entrée reste visible mais devra être re-choisie après un rechargement).
 function serializableSounds(list) {
   return (list || []).map((s) => (s.assetId
-    ? { assetId: s.assetId, name: s.name, url: s.url || null }
-    : { name: s.name, mime: s.mime }));
+    ? { assetId: s.assetId, name: s.name, url: s.url || null, trim: s.trim || null }
+    : { name: s.name, mime: s.mime, trim: s.trim || null }));
 }
 // La couleur de fond vit dans l'input (updateBg/bake la lisent là) : on la
 // capture ici, sinon undo — et un meme rechargé depuis la bibliothèque —
@@ -834,6 +849,7 @@ $('bgPick').onclick = async () => {
   updateBg(); commit();
 };
 function updateBg() {
+  updateBgTrimBtn();
   const bg = $('stageBg'), v = $('stageVideo'), im = $('stageImg');
   bg.style.background = ''; v.classList.add('hidden'); im.classList.add('hidden'); v.src = ''; im.src = '';
   if (base.mode === 'color') bg.style.background = $('bgColor').value;
@@ -948,10 +964,15 @@ function renderSounds() {
       if (!sndPlayer.audio.paused) row.classList.add('playing');
       sndIcon();
     }
+    const cut = document.createElement('button');
+    cut.textContent = '✂';
+    cut.title = s.trim ? `Cut: ${fmtT(s.trim.s)} → ${fmtT(s.trim.e)} — click to adjust` : 'Cut this sound';
+    if (s.trim) cut.style.color = 'var(--accent)';
+    cut.onclick = () => trimSound(s);
     const del = document.createElement('button');
     del.textContent = '🗑'; del.title = 'Remove this sound';
     del.onclick = () => removeSound(i);
-    row.append(name, tag, play, del);
+    row.append(name, tag, play, cut, del);
     box.appendChild(row);
   });
 }
@@ -973,6 +994,246 @@ $('soundsBrowse').onclick = (e) => {
   onSoundPopOpen();
 };
 renderSounds();
+
+// ============================================================
+//  Découpe (timeline basique) — ✂ sur un calque vidéo, sur le fond média
+//  ou sur un son attaché.
+//
+//  NON destructive : seul l'intervalle gardé `{ s, e }` (secondes) est mémorisé
+//  sur l'objet (calque, fond, son) ; le fichier d'origine n'est jamais retouché,
+//  on peut donc rouvrir la découpe et l'élargir. L'intervalle est appliqué à
+//  l'ENVOI, différemment selon le média :
+//   - vidéo → `comp.layers[].trim`, coupé par ffmpeg (chemin serveur) ou joué
+//     de `s` à `e` par l'encodage navigateur ;
+//   - son  → découpé ici en WebAudio et envoyé comme un fichier WAV ordinaire,
+//     qui repasse donc par processMedia comme n'importe quel upload.
+// ============================================================
+const MIN_TRIM_S = 0.1;
+function fmtT(v) {
+  const t = Math.max(0, v || 0);
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}.${Math.floor((t % 1) * 10)}`;
+}
+// Intervalle réellement gardé, borné à la durée connue du média.
+// null → rien à couper (pas de découpe, ou découpe couvrant tout le média).
+function trimRange(o, dur) {
+  const t = o && o.trim;
+  if (!t || !(dur > 0)) return t ? { s: Math.max(0, +t.s || 0), e: Math.max(MIN_TRIM_S, +t.e || 0) } : null;
+  const s = clamp(+t.s || 0, 0, Math.max(0, dur - MIN_TRIM_S));
+  const e = clamp(+t.e || dur, s + MIN_TRIM_S, dur);
+  if (s <= 0.001 && e >= dur - 0.001) return null;
+  return { s, e };
+}
+// Badge « ✂ 0:01.2 → 0:03.4 » des listes (calques, sons).
+function trimLabel(o) {
+  return o && o.trim ? `✂ ${fmtT(o.trim.s)} → ${fmtT(o.trim.e)}` : '';
+}
+
+let trimJob = null; // { media, kind, dur, s, e, onApply, raf, objUrl }
+function trimStopMedia() {
+  if (!trimJob) return;
+  cancelAnimationFrame(trimJob.raf); trimJob.raf = 0;
+  try { trimJob.media.pause(); } catch { /* ignore */ }
+}
+function trimClose() {
+  if (!trimJob) return;
+  trimStopMedia();
+  if (trimJob.objUrl) { try { URL.revokeObjectURL(trimJob.objUrl); } catch { /* ignore */ } }
+  $('trimStage').replaceChildren();
+  $('trimModal').classList.add('hidden');
+  trimJob = null;
+}
+function trimPaint() {
+  if (!trimJob) return;
+  const { dur, s, e } = trimJob;
+  const pct = (t) => `${clamp(t / (dur || 1), 0, 1) * 100}%`;
+  $('trimSel').style.left = pct(s);
+  $('trimSel').style.width = `${clamp((e - s) / (dur || 1), 0, 1) * 100}%`;
+  $('trimHStart').style.left = pct(s);
+  $('trimHEnd').style.left = pct(e);
+  $('trimStartVal').textContent = fmtT(s);
+  $('trimEndVal').textContent = fmtT(e);
+  $('trimKeptVal').textContent = fmtT(e - s);
+  const cur = $('trimCursor');
+  const t = trimJob.media.currentTime || 0;
+  cur.classList.toggle('hidden', !(t > 0));
+  cur.style.left = pct(t);
+}
+// Ouvre la timeline. `src` peut être un File/Blob ou une URL ; `durHint` sert
+// tant que les métadonnées ne sont pas chargées (la durée réelle prime).
+function openTrimModal({ name, kind, src, durHint, trim, onApply }) {
+  trimClose();
+  sndStop(); // une écoute en cours parlerait par-dessus la découpe
+  $('trimErr').textContent = '';
+  $('trimName').textContent = name || (kind === 'video' ? 'Video' : 'Sound');
+  const stage = $('trimStage'); stage.replaceChildren();
+
+  let objUrl = null;
+  const url = (typeof src === 'string') ? src : (objUrl = URL.createObjectURL(src));
+  let media;
+  if (kind === 'video') {
+    media = document.createElement('video');
+    media.src = url; media.playsInline = true; media.preload = 'metadata';
+    media.volume = siteVolume;
+    stage.appendChild(media);
+  } else {
+    const ic = document.createElement('div'); ic.className = 'trim-audio-ic'; ic.textContent = '🎵';
+    stage.appendChild(ic);
+    media = new Audio(url); media.preload = 'metadata'; media.volume = siteVolume;
+  }
+
+  const dur = Math.max(MIN_TRIM_S, (durHint || 0) / 1000 || MIN_TRIM_S);
+  trimJob = { media, kind, dur, s: 0, e: dur, onApply, raf: 0, objUrl };
+  if (trim) { trimJob.s = Math.max(0, +trim.s || 0); trimJob.e = Math.max(trimJob.s + MIN_TRIM_S, +trim.e || dur); }
+  // La durée annoncée par le média fait foi (un calque peut n'avoir aucune
+  // durée connue si ses métadonnées n'étaient pas encore chargées).
+  media.onloadedmetadata = () => {
+    if (!trimJob || !(media.duration > 0)) return;
+    trimJob.dur = media.duration;
+    if (!trim) trimJob.e = media.duration;
+    trimJob.e = Math.min(trimJob.e, media.duration);
+    trimJob.s = Math.min(trimJob.s, Math.max(0, trimJob.e - MIN_TRIM_S));
+    media.currentTime = trimJob.s;
+    trimPaint();
+  };
+  media.onerror = () => { $('trimErr').textContent = 'This media cannot be read here — pick it again.'; };
+  $('trimModal').classList.remove('hidden');
+  trimPaint();
+}
+
+// Glisser des poignées / clic sur la piste.
+(function initTrimTrack() {
+  const track = $('trimTrack');
+  const timeAt = (clientX) => {
+    const r = track.getBoundingClientRect();
+    return clamp((clientX - r.left) / (r.width || 1), 0, 1) * (trimJob?.dur || 1);
+  };
+  const grab = (which) => (e) => {
+    if (!trimJob) return;
+    e.preventDefault(); e.stopPropagation();
+    const move = (ev) => {
+      const t = timeAt(ev.clientX);
+      if (which === 's') trimJob.s = Math.min(t, trimJob.e - MIN_TRIM_S);
+      else trimJob.e = Math.max(t, trimJob.s + MIN_TRIM_S);
+      trimJob.s = clamp(trimJob.s, 0, trimJob.dur); trimJob.e = clamp(trimJob.e, 0, trimJob.dur);
+      trimPaint();
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+  $('trimHStart').addEventListener('pointerdown', grab('s'));
+  $('trimHEnd').addEventListener('pointerdown', grab('e'));
+  // Clic sur la piste (hors poignées) : déplace la tête de lecture.
+  track.addEventListener('pointerdown', (e) => {
+    if (!trimJob || e.target.classList.contains('trim-h')) return;
+    try { trimJob.media.currentTime = timeAt(e.clientX); } catch { /* ignore */ }
+    trimPaint();
+  });
+})();
+
+// Lecture de l'extrait gardé : s'arrête net à la poignée de fin.
+$('trimPlay').onclick = () => {
+  if (!trimJob) return;
+  const { media } = trimJob;
+  if (!media.paused) { trimStopMedia(); $('trimPlay').textContent = '▶ Play'; return; }
+  try { media.currentTime = trimJob.s; } catch { /* ignore */ }
+  media.volume = siteVolume;
+  media.play().catch(() => {});
+  $('trimPlay').textContent = '⏸ Pause';
+  const tick = () => {
+    if (!trimJob) return;
+    if (trimJob.media.currentTime >= trimJob.e) { trimStopMedia(); $('trimPlay').textContent = '▶ Play'; trimPaint(); return; }
+    trimPaint();
+    trimJob.raf = requestAnimationFrame(tick);
+  };
+  trimJob.raf = requestAnimationFrame(tick);
+};
+$('trimReset').onclick = () => { if (trimJob) { trimJob.s = 0; trimJob.e = trimJob.dur; trimPaint(); } };
+$('trimCancel').onclick = () => trimClose();
+$('trimOk').onclick = () => {
+  if (!trimJob) return;
+  const { s, e, dur, onApply } = trimJob;
+  // Intervalle couvrant tout le média → on retire la découpe plutôt que d'en
+  // mémoriser une qui ne coupe rien (et ferait travailler ffmpeg pour rien).
+  const whole = s <= 0.001 && e >= dur - 0.001;
+  trimClose();
+  onApply(whole ? null : { s: +s.toFixed(3), e: +e.toFixed(3) });
+};
+
+// ---- Découpe d'un son : WebAudio → WAV ----------------------------------
+// Le WAV part comme un fichier ordinaire : le serveur le re-transcode (et le
+// normalise) comme tout upload, la garantie anti-injection est intacte.
+function encodeWav(chans, rate, len) {
+  const nch = chans.length;
+  const buf = new ArrayBuffer(44 + len * nch * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + len * nch * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, nch, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * nch * 2, true);
+  view.setUint16(32, nch * 2, true); view.setUint16(34, 16, true);
+  str(36, 'data'); view.setUint32(40, len * nch * 2, true);
+  let off = 44;
+  for (let i = 0; i < len; i++) {
+    for (let c = 0; c < nch; c++) {
+      const v = clamp(chans[c][i] || 0, -1, 1);
+      view.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+async function cutAudioToFile(source, trim, name) {
+  const raw = (source instanceof Blob) ? await source.arrayBuffer() : await (await fetch(source)).arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error('WebAudio unavailable');
+  const actx = new AC();
+  try {
+    const buf = await actx.decodeAudioData(raw);
+    const s = clamp(trim.s, 0, Math.max(0, buf.duration - MIN_TRIM_S));
+    const e = clamp(trim.e, s + MIN_TRIM_S, buf.duration);
+    const from = Math.floor(s * buf.sampleRate);
+    const to = Math.min(buf.length, Math.ceil(e * buf.sampleRate));
+    const len = Math.max(1, to - from);
+    const chans = [];
+    for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c).subarray(from, to));
+    const base = (name || 'sound').replace(/\.[^.]+$/, '').slice(0, 60);
+    return new File([encodeWav(chans, buf.sampleRate, len)], `${base}-cut.wav`, { type: 'audio/wav' });
+  } finally { try { actx.close(); } catch { /* ignore */ } }
+}
+
+// Points d'entrée de la découpe (listes de calques et de sons, fond média).
+function trimVideoLayer(el) {
+  const mf = mediaFiles.get(el.id);
+  if (!mf) { $('sendErr').textContent = 'This video must be picked again.'; return; }
+  openTrimModal({
+    name: el.name || 'Video', kind: 'video', src: mf.file, durHint: el.durMs, trim: el.trim,
+    onApply: (t) => { if (t) el.trim = t; else delete el.trim; renderElements(); commit(); },
+  });
+}
+function trimSound(s) {
+  const src = soundSrc(s);
+  if (!src) { $('sendErr').textContent = 'This sound must be picked again (file not kept).'; return; }
+  openTrimModal({
+    name: s.name || 'Sound', kind: 'audio', src: s.file || src, trim: s.trim,
+    onApply: (t) => { if (t) s.trim = t; else delete s.trim; renderSounds(); commit(); },
+  });
+}
+$('bgTrim').onclick = () => {
+  const m = base.media;
+  if (!m || !m.file || !['video', 'audio'].includes(m.kind)) return;
+  openTrimModal({
+    name: m.name || 'Background', kind: m.kind === 'video' ? 'video' : 'audio', src: m.file,
+    durHint: m.durMs, trim: m.trim,
+    onApply: (t) => { if (t) m.trim = t; else delete m.trim; updateBgTrimBtn(); updateBg(); commit(); },
+  });
+};
+// Le bouton ✂ du fond n'a de sens que sur une vidéo ou un son encore présents.
+function updateBgTrimBtn() {
+  const m = base.media;
+  const on = !!(m && m.file && ['video', 'audio'].includes(m.kind));
+  $('bgTrim').classList.toggle('hidden', !on);
+  if (on) $('bgTrim').textContent = m.trim ? `✂ ${fmtT(m.trim.s)} → ${fmtT(m.trim.e)}` : '✂ Cut';
+}
 
 // ---- Volume d'écoute LOCAL du site (coin bas droit) ---------------------
 // Master volume appliqué à tout ce qui est joué DANS l'éditeur (aperçus,
@@ -1626,6 +1887,23 @@ function openEncodeVideo(url) {
   });
 }
 
+// Découpe appliquée à une source d'encodage : la lecture démarrera à `s`, et la
+// source sera figée à `e` par la boucle de rendu — le canvas continue alors de
+// dessiner sa dernière image, exactement comme le `tpad=stop_mode=clone` du
+// serveur pour une vidéo plus courte que la scène.
+function applyTrimToSource(v, o) {
+  const cut = trimRange(o, v.duration || (o.durMs || 0) / 1000);
+  if (cut) v._trim = cut;
+}
+// Fige les sources arrivées au bout de leur extrait. Appelée à chaque frame :
+// l'événement `timeupdate` ne bat qu'environ 4 fois par seconde et laisserait
+// passer jusqu'à un quart de seconde de vidéo coupée.
+function holdTrimmedSources(videoEls) {
+  for (const v of videoEls) {
+    if (v._trim && !v.paused && v.currentTime >= v._trim.e) { try { v.pause(); } catch { /* ignore */ } }
+  }
+}
+
 // Une frame complète de la scène animée, dans l'ORDRE EXACT du filtergraph
 // serveur : couleur de fond → habillage « under » → calques vidéo (z croissant)
 // → habillage « over ». Les deux habillages sont des canvas gravés une seule
@@ -1685,6 +1963,7 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
       if (plan.bgMedia.kind === 'video') {
         const url = URL.createObjectURL(plan.bgMedia.file); urls.push(url);
         bgSource = await openEncodeVideo(url);
+        applyTrimToSource(bgSource, plan.bgMedia);
         videoEls.push(bgSource); audioEls.push(bgSource);
       } else {
         bgSource = bgVisualEl(plan.bgMedia);
@@ -1696,6 +1975,7 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
       const file = mediaFiles.get(el.id).file;
       const url = URL.createObjectURL(file); urls.push(url);
       const v = await openEncodeVideo(url);
+      applyTrimToSource(v, el);
       sources.set(el.id, v); videoEls.push(v);
       if (!el.muted) audioEls.push(v);
       // Un élément dont la sortie n'est PAS détournée vers WebAudio sortirait
@@ -1739,7 +2019,7 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
     // Lecture en temps réel depuis le début. Une vidéo plus courte que la scène
     // se termine et reste affichée sur sa dernière image, que le canvas continue
     // de dessiner : c'est exactement le `tpad=stop_mode=clone` du serveur.
-    for (const v of videoEls) { try { v.currentTime = 0; } catch { /* ignore */ } }
+    for (const v of videoEls) { try { v.currentTime = v._trim ? v._trim.s : 0; } catch { /* ignore */ } }
     await Promise.all(videoEls.map((v) => (v.play() || Promise.resolve()).catch(() => {})));
 
     let raf = 0; let running = true;
@@ -1748,6 +2028,7 @@ async function composeSceneToVideo(plan, mimeType, onProgress) {
     let lastPct = -1;
     const tick = () => {
       if (!running) return;
+      holdTrimmedSources(videoEls);
       drawEncodeFrame(ctx, EW, EH, plan, under, over, sources, bgSource);
       // Progression au pour-cent près : inutile de retoucher le DOM à 60 Hz.
       const r = clamp((performance.now() - t0) / durationMs, 0, 1);
@@ -1892,9 +2173,13 @@ function buildPayload() {
   opts.box = placeBox;
   const payload = { text: textForModeration(), options: opts, groups: [...selGroups], mentions: [...selMembers] };
   // Sons : assets de la bibliothèque (par id) et/ou fichiers encore présents.
+  // `trim`/`url` sont internes à l'éditeur : la découpe est appliquée par
+  // applySoundCuts() juste avant l'envoi, qui les remplace par un fichier.
   payload.sounds = sounds
     .filter((s) => s.assetId || s.file)
-    .map((s) => (s.assetId ? { assetId: s.assetId, name: s.name } : { file: s.file, mime: s.mime, filename: s.name }));
+    .map((s) => (s.assetId
+      ? { assetId: s.assetId, name: s.name, trim: s.trim || null, url: s.url || null }
+      : { file: s.file, mime: s.mime, filename: s.name, trim: s.trim || null }));
 
   const bgMedia = currentBgMedia();
   const hasStatic = els.some((e) => !e.hidden && e.type !== 'video') || strokes.length > 0;
@@ -1923,6 +2208,8 @@ function buildPayload() {
     for (const el of vids) {
       const L = { xPct: el.xPct, yPct: el.yPct, wPct: el.wPct, rot: el.rot, opacity: el.opacity };
       if (el.muted) L.mute = true; // le composer serveur écarte cette piste du mixage
+      const cut = trimRange(el, (el.durMs || 0) / 1000);
+      if (cut) L.trim = cut; // ffmpeg ne décode que l'extrait gardé
       if (hasQuad(el)) L.quad = videoQuadPx(el); // déformation (corner pin) appliquée par ffmpeg
       files.push({ file: mediaFiles.get(el.id).file, filename: el.name || 'layer' });
       layers.push(L);
@@ -1933,9 +2220,25 @@ function buildPayload() {
     // l'absence de couleur et encoderait en VP9 alpha une scène opaque.
     payload.comp = { v: 1, bg: plan.bg, transparent: plan.transparent, durationS: plan.durationS, layers };
     if (hasOver) payload.overlay = { dataUrl: bake(true, 'over', minVideoZ), filename: 'overlay.png' };
+  } else if (bgMedia && bgMedia.kind === 'video' && trimRange(bgMedia, (bgMedia.durMs || 0) / 1000)) {
+    // --- Fond vidéo DÉCOUPÉ, sans calque : la coupe est faite par ffmpeg, on
+    // repasse donc par la composition (un unique calque plein cadre) plutôt que
+    // par l'envoi brut, qui livrerait la vidéo entière.
+    opts.bakedText = true;
+    payload.layers = [{ file: bgMedia.file, filename: bgMedia.name }];
+    payload.comp = {
+      v: 1, bg: null, transparent: sceneIsTransparent(bgMedia), durationS: options.durationS,
+      layers: [{ full: true, trim: trimRange(bgMedia, (bgMedia.durMs || 0) / 1000) }],
+    };
+    if (hasStatic) payload.overlay = { dataUrl: bake(true), filename: 'overlay.png' };
   } else if (bgMedia && ['video', 'gif', 'audio'].includes(bgMedia.kind)) {
     // --- Fond vidéo/gif/son seul : envoi brut + overlay PNG (chemin léger). ---
-    payload.media = { file: bgMedia.file, mime: bgMedia.mime, filename: bgMedia.name };
+    // `trim` n'a de sens ici que pour un fond SON : c'est le seul média que
+    // l'éditeur découpe lui-même (une vidéo découpée est partie en composition).
+    payload.media = {
+      file: bgMedia.file, mime: bgMedia.mime, filename: bgMedia.name,
+      trim: bgMedia.kind === 'audio' ? (bgMedia.trim || null) : null,
+    };
     if (hasStatic) { opts.bakedText = true; payload.overlay = { dataUrl: bake(true), filename: 'overlay.png' }; }
   } else {
     // --- Image / couleur / transparent → tout est composé dans un PNG. ---
@@ -1949,8 +2252,38 @@ function buildPayload() {
 // navigateur sait composer la vidéo, elle remplace calques + comp + overlay par
 // un `media` ordinaire et le serveur n'a plus à lancer ffmpeg pour l'assembler.
 // Sinon on renvoie tel quel le payload serveur, sans rien dire à l'utilisateur.
+// Applique les découpes de SON (les vidéos, elles, sont coupées à l'encodage).
+// Un son découpé part comme un fichier WAV : plus d'assetId, le serveur reçoit
+// l'extrait tel quel et le transcode comme n'importe quel upload.
+async function applySoundCuts(payload) {
+  const clean = (s) => { const c = { ...s }; delete c.trim; delete c.url; return c; };
+  const out = [];
+  for (const s of payload.sounds || []) {
+    if (!s.trim) { out.push(clean(s)); continue; }
+    const src = s.file || s.url;
+    if (!src) { out.push(clean(s)); continue; }
+    // Échec = envoi bloqué : livrer le son ENTIER alors que l'utilisateur l'a
+    // coupé serait pire qu'une erreur affichée.
+    const file = await cutAudioToFile(src, s.trim, s.filename || s.name || 'sound')
+      .catch((e) => { throw new Error(`Could not cut the sound « ${s.name || 'sound'} » (${e.message}).`); });
+    out.push({ file, mime: 'audio/wav', filename: file.name });
+  }
+  payload.sounds = out;
+  // Fond SON découpé : même traitement, le fichier de fond est remplacé par
+  // l'extrait (le fond vidéo, lui, passe par la composition).
+  const m = payload.media;
+  if (m && m.trim && m.file) {
+    const file = await cutAudioToFile(m.file, m.trim, m.filename || 'sound')
+      .catch((e) => { throw new Error(`Could not cut the background sound (${e.message}).`); });
+    payload.media = { file, mime: 'audio/wav', filename: file.name };
+  } else if (m && m.trim) {
+    delete m.trim;
+  }
+  return payload;
+}
+
 async function buildPayloadForSend(onProgress) {
-  const payload = buildPayload();
+  const payload = await applySoundCuts(buildPayload());
   if (!payload.layers) return payload;
   const media = await composeIfPossible(animatedScenePlan(), onProgress);
   if (!media) return payload;
@@ -2462,13 +2795,30 @@ function stopPreview() {
   pvAudios.length = 0;
   $('previewScreen').replaceChildren();
 }
-function pvVideo(src, vol) {
+// `cutOf` : l'objet découpé (calque ou fond) dont l'extrait doit être respecté,
+// pour que l'aperçu montre bien ce que verront les destinataires.
+function pvVideo(src, vol, cutOf) {
   const v = document.createElement('video');
   v.src = src; v.autoplay = true; v.playsInline = true;
   v._baseVol = vol ?? 0.7;
   v.volume = localVol(v._baseVol); v.muted = v.volume === 0;
+  applyPreviewTrim(v, cutOf);
   v.play?.().catch(() => {});
   return v;
+}
+// Démarre à `s` et fige à `e`. Sert aux vidéos comme aux sons de l'aperçu.
+function applyPreviewTrim(m, cutOf) {
+  if (!cutOf || !cutOf.trim) return;
+  const start = () => {
+    const cut = trimRange(cutOf, m.duration || 0);
+    if (!cut) return;
+    m._cut = cut;
+    try { m.currentTime = cut.s; } catch { /* ignore */ }
+  };
+  if (m.readyState >= 1) start(); else m.addEventListener('loadedmetadata', start, { once: true });
+  m.addEventListener('timeupdate', () => {
+    if (m._cut && m.currentTime >= m._cut.e) { try { m.pause(); } catch { /* ignore */ } }
+  });
 }
 $('previewBtn').onclick = renderPreview;
 $('previewClose').onclick = () => { stopPreview(); $('previewModal').classList.add('hidden'); };
@@ -2492,12 +2842,12 @@ function renderPreview() {
     if (base.mode === 'color') st.style.background = $('bgColor').value;
     else if (base.mode === 'media' && base.media) {
       if (base.media.kind === 'video' && base.media.file) {
-        const v = pvVideo(URL.createObjectURL(base.media.file), vol);
+        const v = pvVideo(URL.createObjectURL(base.media.file), vol, base.media);
         v.className = 'pv-full'; st.appendChild(v);
       } else if (base.media.kind === 'audio' && base.media.file) {
         st.style.background = 'linear-gradient(135deg,#1c1c22,#141418)';
         const a = new Audio(URL.createObjectURL(base.media.file));
-        a._baseVol = vol; a.volume = localVol(vol); a.play().catch(() => {}); pvAudios.push(a);
+        a._baseVol = vol; a.volume = localVol(vol); applyPreviewTrim(a, base.media); a.play().catch(() => {}); pvAudios.push(a);
       } else if (base.media.dataUrl || base.media.file) {
         const im = document.createElement('img'); im.className = 'pv-full';
         im.src = base.media.dataUrl || URL.createObjectURL(base.media.file);
@@ -2515,7 +2865,7 @@ function renderPreview() {
     for (const el of pvVids) {
       const mf = mediaFiles.get(el.id); if (!mf) continue;
       // Un calque coupé (🔇) reste muet dans l'aperçu, comme chez le destinataire.
-      const n = el.kind === 'gif' ? (() => { const i = document.createElement('img'); i.src = mf.url; return i; })() : pvVideo(mf.url, el.muted ? 0 : vol);
+      const n = el.kind === 'gif' ? (() => { const i = document.createElement('img'); i.src = mf.url; return i; })() : pvVideo(mf.url, el.muted ? 0 : vol, el);
       n.className = 'pv-el';
       const nw = el.wPct * w, nh = nw / el.ratio;
       const distort = hasQuad(el) ? ` ${cssMatrix3d(el, nw, nh)}` : '';
@@ -2538,7 +2888,9 @@ function renderPreview() {
     for (const s of sounds) {
       const src = soundSrc(s);
       if (!src) continue;
-      const a = new Audio(src); a._baseVol = vol; a.volume = localVol(vol); a.play().catch(() => {}); pvAudios.push(a);
+      const a = new Audio(src); a._baseVol = vol; a.volume = localVol(vol);
+      applyPreviewTrim(a, s); // son découpé : l'aperçu ne joue que l'extrait gardé
+      a.play().catch(() => {}); pvAudios.push(a);
     }
 
     // Fin après la durée réglée : animation de sortie puis disparition.

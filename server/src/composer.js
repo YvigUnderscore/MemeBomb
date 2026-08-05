@@ -89,7 +89,7 @@ function sanitizeQuad(q) {
  * Fond « Aucun » → WebM VP9 AVEC TRANSPARENCE (alpha) : le destinataire voit
  * les calques flotter sur son écran, sans rectangle noir autour.
  * @param {Buffer[]} layerBuffers  fichiers dans l'ordre de comp.layers (z croissant)
- * @param {object} comp  { bg: '#rrggbb'|null, durationS, layers: [{full?, mute?, xPct,yPct,wPct,rot,opacity}] }
+ * @param {object} comp  { bg: '#rrggbb'|null, durationS, layers: [{full?, mute?, trim?: {s,e}, xPct,yPct,wPct,rot,opacity}] }
  * @param {Buffer|null} overlayBuffer  PNG transparent 1280x720 gravé au-dessus
  * @param {object} settings  réglages du channel (limites)
  * @returns {Promise<{buffer: Buffer, mime: string, transparent: boolean}>}
@@ -146,6 +146,15 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
         metas[i].hasAudio = metas[i].kind === 'video'
           && !descs[i]?.mute
           && (info.streams || []).some((s) => s.codec_type === 'audio');
+        // Découpe (✂ de l'éditeur) : seul l'extrait gardé est décodé, et c'est
+        // lui qui compte dans la durée de la scène. Bornée à la durée réelle du
+        // fichier — un intervalle fantaisiste ne doit pas produire un flux vide.
+        const t = descs[i]?.trim;
+        if (metas[i].kind === 'video' && t && metas[i].durationS > 0) {
+          const s = num(t.s, 0, Math.max(0, metas[i].durationS - 0.1), 0);
+          const e = num(t.e, s + 0.1, metas[i].durationS, metas[i].durationS);
+          if (e > s + 0.05) { metas[i].trim = { s, d: e - s }; metas[i].durationS = e - s; }
+        }
         const vs = (info.streams || []).find((s) => s.width);
         metas[i].w = vs?.width || 0;
         metas[i].h = vs?.height || 0;
@@ -175,6 +184,9 @@ export async function composeLayers(layerBuffers, comp, overlayBuffer, settings)
       if (i >= layerBuffers.length) break;
       if (metas[i].kind === 'image') cmd.input(tmps[i]).inputOptions(['-loop', '1']);
       else if (metas[i].kind === 'gif') cmd.input(tmps[i]).inputOptions(['-ignore_loop', '0']);
+      // `-ss`/`-t` AVANT l'entrée : ffmpeg saute directement au point de coupe
+      // au lieu de décoder puis jeter le début.
+      else if (metas[i].trim) cmd.input(tmps[i]).inputOptions(['-ss', metas[i].trim.s.toFixed(3), '-t', metas[i].trim.d.toFixed(3)]);
       else cmd.input(tmps[i]);
     }
     if (overlayPath) cmd.input(overlayPath);
