@@ -22,7 +22,7 @@ import { createAndDispatchMeme, signMediaUrl, MAX_SOUNDS } from '../memeService.
 import { createSchedule } from '../scheduler.js';
 import { removeMediaFile, soundPathsOf } from '../retention.js';
 import { pushPanel, invalidateBlocks, channelPresence } from '../wsHub.js';
-import { searchMyInstants, downloadMyInstants } from '../sounds.js';
+import { searchMyInstants, trendingMyInstants, downloadMyInstants, TRENDING_REGIONS } from '../sounds.js';
 import { giphyEnabled, searchGiphy, fetchRemoteMedia } from '../webmedia.js';
 import { asyncHandler } from './helpers.js';
 
@@ -236,6 +236,16 @@ router.post('/media/from-url', deviceAuth, asyncHandler(async (req, res) => {
 router.get('/sounds/search', deviceAuth, asyncHandler(async (req, res) => {
   const q = z.object({ q: z.string().max(80).optional().default('') }).parse(req.query).q;
   res.json(await searchMyInstants(q));
+}));
+
+// Parcourir la soundboard sans rien chercher : les sons tendance du moment,
+// par région (idée d'Epi — trouver des sons quand on n'a pas d'idée).
+router.get('/sounds/trending', deviceAuth, asyncHandler(async (req, res) => {
+  const region = z.object({ region: z.string().max(10).optional().default('world') }).parse(req.query).region;
+  res.json({
+    regions: Object.entries(TRENDING_REGIONS).map(([id, r]) => ({ id, label: r.label })),
+    results: await trendingMyInstants(region),
+  });
 }));
 
 // Aperçu d'un son myinstants (proxy SSRF-guardé) — remplace l'IPC Electron `sounds:preview`

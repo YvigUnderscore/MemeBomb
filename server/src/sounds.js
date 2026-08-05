@@ -12,23 +12,24 @@ const HOST_RX = /^(www\.)?myinstants\.com$/i;
 // UA type navigateur : certains CDN refusent les UA exotiques.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-/** Recherche des sons sur myinstants et renvoie [{ title, url }]. */
-export async function searchMyInstants(query, limit = 24) {
-  const q = String(query || '').trim().slice(0, 80);
-  if (!q) return [];
-  let html;
+/** Récupère une page myinstants (SSRF-guardé : URL construite ici, jamais reçue). */
+async function fetchInstantsPage(url, what) {
   try {
-    // URL localisée (/fr/) : le chemin non préfixé (/search/) renvoie désormais
-    // une redirection 302 — incompatible avec redirect:'error' (anti-SSRF).
-    const resp = await fetch(`https://www.myinstants.com/fr/search/?name=${encodeURIComponent(q)}`, {
+    // URL localisée (/fr/) : le chemin non préfixé renvoie désormais une
+    // redirection 302 — incompatible avec redirect:'error' (anti-SSRF).
+    const resp = await fetch(url, {
       headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'error',
     });
-    if (!resp.ok) throw new HttpError(502, `Sound search unavailable (HTTP ${resp.status}).`);
-    html = await resp.text();
+    if (!resp.ok) throw new HttpError(502, `${what} unavailable (HTTP ${resp.status}).`);
+    return await resp.text();
   } catch (e) {
     if (e instanceof HttpError) throw e;
-    throw new HttpError(502, `Sound search unavailable (${e?.cause?.code || e.message || 'network'}).`);
+    throw new HttpError(502, `${what} unavailable (${e?.cause?.code || e.message || 'network'}).`);
   }
+}
+
+/** Extrait les boutons « instant » d'une page myinstants → [{ title, url }]. */
+function parseInstants(html, limit) {
   const rx = /<button class="small-button" onclick="play\('(\/media\/sounds\/[^']+\.mp3)'[^)]*\)"[^>]*title="([^"]+)"/g;
   const out = [];
   const seen = new Set();
@@ -45,6 +46,37 @@ export async function searchMyInstants(query, limit = 24) {
     out.push({ title, url });
   }
   return out;
+}
+
+/** Recherche des sons sur myinstants et renvoie [{ title, url }]. */
+export async function searchMyInstants(query, limit = 24) {
+  const q = String(query || '').trim().slice(0, 80);
+  if (!q) return [];
+  const html = await fetchInstantsPage(
+    `https://www.myinstants.com/fr/search/?name=${encodeURIComponent(q)}`, 'Sound search',
+  );
+  return parseInstants(html, limit);
+}
+
+// Pages « tendances » de myinstants, par région. Liste FERMÉE : la région
+// reçue du client sert uniquement de clé ici, jamais de morceau d'URL —
+// aucun chemin arbitraire ne peut donc être fabriqué depuis l'extérieur.
+export const TRENDING_REGIONS = {
+  world: { label: 'Monde', path: '/fr/' },
+  fr: { label: 'France', path: '/fr/index/fr/' },
+  us: { label: 'États-Unis', path: '/fr/index/us/' },
+  gb: { label: 'Royaume-Uni', path: '/fr/index/gb/' },
+  es: { label: 'Espagne', path: '/fr/index/es/' },
+  de: { label: 'Allemagne', path: '/fr/index/de/' },
+  it: { label: 'Italie', path: '/fr/index/it/' },
+  br: { label: 'Brésil', path: '/fr/index/br/' },
+};
+
+/** Sons tendance d'une région → [{ title, url }] (même format que la recherche). */
+export async function trendingMyInstants(region = 'world', limit = 24) {
+  const entry = TRENDING_REGIONS[String(region || '').toLowerCase()] || TRENDING_REGIONS.world;
+  const html = await fetchInstantsPage(`https://www.myinstants.com${entry.path}`, 'Trending sounds');
+  return parseInstants(html, limit);
 }
 
 /** Télécharge un mp3 myinstants (SSRF-guardé, taille plafonnée) → Buffer. */

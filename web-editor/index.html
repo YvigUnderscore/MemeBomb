@@ -135,6 +135,7 @@
         <div id="bgMediaWrap" class="hidden">
           <button class="btn btn-ghost wide" id="bgPick">Pick image / GIF / video / sound</button>
           <div class="muted small" id="bgMediaName"></div>
+          <button class="btn btn-ghost hidden" id="bgTrim" style="margin-top:6px">✂ Cut</button>
         </div>
       </div>
 
@@ -163,6 +164,13 @@
             <button class="btn btn-ghost" id="sbSearch">Search</button>
           </div>
           <div id="sbResults" class="sb-list"></div>
+
+          <div class="row" style="gap:6px; align-items:center; margin-top:10px">
+            <div class="muted small" style="flex:1">🔥 Trending</div>
+            <select id="sbRegion" class="input" style="width:auto; padding:2px 6px"></select>
+            <button class="btn btn-ghost" id="sbTrendReload" title="Refresh" style="padding:2px 8px">↻</button>
+          </div>
+          <div id="sbTrending" class="sb-list"></div>
 
           <div class="muted small" style="margin-top:10px">🎛️ Channel soundboard (shared)</div>
           <div id="sbShared" class="sb-list"></div>
@@ -288,6 +296,30 @@
       <h3>Preview — as your friends will see it</h3>
       <div class="preview-screen" id="previewScreen"></div>
       <div class="row end"><button class="btn btn-ghost" id="previewReplay">↻ Replay</button><button class="btn btn-primary" id="previewClose">Close</button></div>
+    </div>
+  </div>
+
+  <!-- Cut (basic timeline) — video layers, background media and attached sounds -->
+  <div class="modal hidden" id="trimModal">
+    <div class="modal-box card pad">
+      <h3>✂ Cut — <span id="trimName"></span></h3>
+      <div class="trim-stage" id="trimStage"></div>
+      <div class="trim-track" id="trimTrack">
+        <div class="trim-sel" id="trimSel"></div>
+        <div class="trim-cursor hidden" id="trimCursor"></div>
+        <div class="trim-h" id="trimHStart"></div>
+        <div class="trim-h" id="trimHEnd"></div>
+      </div>
+      <div class="trim-times">
+        <span>Start <b id="trimStartVal">0:00.0</b></span>
+        <span>End <b id="trimEndVal">0:00.0</b></span>
+        <span style="flex:1">Kept <b id="trimKeptVal">0:00.0</b></span>
+        <button class="btn btn-ghost" id="trimPlay">▶ Play</button>
+        <button class="btn btn-ghost" id="trimReset">Whole</button>
+      </div>
+      <div class="muted small">Drag the handles to keep only a part. Click the track to move the playhead.</div>
+      <div class="err" id="trimErr"></div>
+      <div class="row end"><button class="btn btn-ghost" id="trimCancel">Cancel</button><button class="btn btn-primary" id="trimOk">Cut</button></div>
     </div>
   </div>
 
