@@ -2,6 +2,7 @@
 
 ## 🔧 Client (Windows)
 - A sound no longer outlives the meme it came with. Sounds and videos are stopped when the meme leaves the screen — a detached `<audio>` kept playing under Chromium, so a sound longer than the meme (or a meme deliberately shortened by the sender) went on playing over an empty screen.
+- **Do not disturb no longer survives a restart.** Launching the app (or rebooting the PC) turns it off, so you can't stay unreachable for days after enabling it once. Timed modes (30 min / 1 h) are unchanged.
 
 ---
 

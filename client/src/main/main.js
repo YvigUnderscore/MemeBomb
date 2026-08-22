@@ -447,6 +447,10 @@ function applyAutoLaunch(enabled) {
 // ---- Cycle de vie -------------------------------------------------------
 app.whenReady().then(() => {
   store = new Store();
+  // Le « ne pas déranger » ne survit pas à un redémarrage de l'app ou du PC : il
+  // s'oublie facilement, et rester injoignable sans le savoir est pire que le
+  // rallumer d'un clic.
+  if (store.get().fun?.doNotDisturb) store.set({ fun: { doNotDisturb: false, dndUntil: 0 } });
   connection = new Connection(store);
   overlay = new OverlayManager(store);
   overlay.create();
