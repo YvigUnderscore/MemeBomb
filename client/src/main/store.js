@@ -39,18 +39,21 @@ const DEFAULTS = {
   network: {
     maxDownloadMBps: 5,      // débit de téléchargement max (défaut 5 MB/s)
   },
+  // Aucun raccourci global par défaut : une combinaison imposée risque de voler
+  // une touche à un autre logiciel. L'utilisateur les associe lui-même dans les
+  // réglages ; une valeur vide n'est jamais enregistrée (cf. registerShortcuts).
   shortcuts: {
-    openEditor: 'CommandOrControl+Alt+M',
-    toggleOverlay: 'CommandOrControl+Alt+O',
-    toggleMute: 'CommandOrControl+Alt+P',
-    doNotDisturb: 'CommandOrControl+Alt+D',
+    openEditor: '',
+    toggleOverlay: '',
+    toggleMute: '',
+    doNotDisturb: '',
     // Réactions au dernier meme reçu (#6) et blocage de son expéditeur (#15).
-    react1: 'CommandOrControl+Alt+1',
-    react2: 'CommandOrControl+Alt+2',
-    react3: 'CommandOrControl+Alt+3',
-    react4: 'CommandOrControl+Alt+4',
-    blockLast: 'CommandOrControl+Alt+B',
-    replayLast: 'CommandOrControl+Alt+R',
+    react1: '',
+    react2: '',
+    react3: '',
+    react4: '',
+    blockLast: '',
+    replayLast: '',
   },
   // Emojis associés aux raccourcis react1..react4 (doivent être dans la liste serveur).
   reactionEmojis: ['😂', '🔥', '💀', '❤️'],

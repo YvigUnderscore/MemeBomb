@@ -1,3 +1,12 @@
+# MemeDrop v1.6.0 — "No key of yours, unless you say so"
+
+## 🔧 Client (Windows)
+- **Global shortcuts are now off by default.** No key combination is registered when the app starts: the shipped defaults (`Ctrl+Alt+M`, `Ctrl+Alt+O`, …) could steal a key from another program without ever being asked for. Assign the ones you want in **Settings → Global shortcuts**.
+- A shortcut field can be emptied again with **Backspace**, **Delete** or **Escape**, and the reset button now clears them all instead of restoring the old defaults.
+- Existing installs keep the shortcuts already saved — only new installs start empty.
+
+---
+
 # MemeDrop v1.5.1 — "The meme ends, the sound ends"
 
 ## 🔧 Client (Windows)

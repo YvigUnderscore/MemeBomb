@@ -311,8 +311,16 @@ function buildAnchorGrid() {
 function bindShortcut(id, key) {
   const el = $(id);
   el.value = cfg.shortcuts[key] || '';
+  el.placeholder = 'None';
   el.onkeydown = (e) => {
     e.preventDefault();
+    // Retirer le raccourci : aucune touche n'est associée par défaut, on doit
+    // pouvoir revenir à cet état sans passer par le bouton global.
+    if (['Backspace', 'Delete', 'Escape'].includes(e.key)) {
+      el.value = '';
+      setCfg({ shortcuts: { [key]: '' } });
+      return;
+    }
     const parts = [];
     if (e.ctrlKey || e.metaKey) parts.push('CommandOrControl');
     if (e.altKey) parts.push('Alt');
